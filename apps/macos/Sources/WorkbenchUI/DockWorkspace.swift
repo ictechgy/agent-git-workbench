@@ -75,7 +75,7 @@ struct DockWorkspace: View {
                   Button(pane.title) { layout.showPane(pane) }
                 }
               }
-              Button("기본 배치 복구") { layout.apply(.classic) }
+              Button("기본 배치 복구") { layout.apply(.focus) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
           }
           DockDragOverlay(drag: drag, size: size).allowsHitTesting(false)
