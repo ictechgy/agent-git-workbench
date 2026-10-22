@@ -6,7 +6,7 @@
 
 **여러 저장소와 워크트리 사이에서 코드 검토를 이어가는 네이티브 macOS Git 앱.**
 
-A native macOS Git workbench for worktrees, multiple repositories, and review alongside AI tools.
+A native macOS Git app for reviewing work across repositories and worktrees.
 
 > 초기 개발 단계입니다. SwiftUI/AppKit 앱과 Rust 로컬 엔진이 동작하지만, 정식 릴리스·배포 설치기는 아직 없습니다. 제품명과 라이선스도 미확정입니다.
 

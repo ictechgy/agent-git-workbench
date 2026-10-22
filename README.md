@@ -58,11 +58,11 @@ The script builds the Rust engine and Swift app into a development-signed bundle
 
 Example creation only affects synthetic repositories. **Open repository…** currently registers a single-repository workspace with no preparation recipes. Multi-repository and recipe configurations are demonstrated by the built-in example and the [CLI examples (Korean)](docs/cli.md). Creating, editing, or importing these configurations through the GUI is not implemented yet.
 
-Running a new task for a normally registered project creates a `feature/<task_slug>` branch ref in the original repository. `materialize` also creates a separate working directory under the app data location; `branch_only` creates only the ref and leaves the directory pending. Registration defaults to the current branch at the time of first registration, falling back to the first local branch for a detached HEAD, or `main` if none exists. Check the base branch and OID in the plan before executing it.
+Running a new task for a project registered with **Open repository…** creates a `feature/<task_slug>` branch ref in the original repository. `materialize` also creates a separate working directory under the app data location; `branch_only` creates only the ref and leaves the directory pending. Registration defaults to the current branch at the time of first registration, falling back to the first local branch for a detached HEAD, or `main` if none exists. Check the base branch and OID in the plan before executing it.
 
 ## Keep working
 
-- **Check the location:** Switch between a task's working directory and the original project directory. Pending or failed preparation is shown explicitly.
+- **Check the location:** Switch between a task's working directory and the original project directory. Pending or failed preparation is not shown as successful.
 - **Resume a review:** Switching directories within a workspace restores the recent file, diff, and scroll position. Saved intent, completion criteria, and verification records remain in the journal. Commit drafts last for the current app session. Personal review and scroll state clear when you switch workspaces or quit.
 - **Arrange the panes:** Drag a pane title to another pane's left, right, top, or bottom edge to split, or to its center to combine them as tabs. The layout is restored on the next launch. Reopen hidden panes through **Layout** (`화면 구성`) in the toolbar.
 - **Separate checks from reports:** **Whitespace and conflict-marker check** (`공백 · 충돌 마커 검사`) runs `git diff --check` on tracked and staged changes and checks Git conflict and in-progress operation state. It does not build or test the project, or inspect untracked file contents or submodule contents.
@@ -73,11 +73,11 @@ Settings, recent projects, and the task journal live in `~/Library/Application S
 
 ## Current limitations
 
-- **Not implemented:** Fetch, pull, push, general branch checkout/rename/deletion (branch creation is available through task preparation), discard, merge/rebase/conflict-resolution UI, history rewriting, arbitrary-line staging, stash apply/delete, automatic AI calls, CI/build/merge execution, and Windows/Linux GUIs.
-- **Git execution policy:** Git fsmonitor, hooks, and external signing programs are disabled. App-created commits do not run hooks and are unsigned, including when `commit.gpgsign=true`. Configured external clean/smudge/process commands cause status/diff reads, preparation, and writes to be rejected. Global LFS filter commands trigger this restriction even when the repository does not use LFS. In the repository, inspect configured commands with `git config --show-origin --get-regexp '^filter\..*\.(clean|smudge|process)$'`.
+- **Not implemented:** Remote sync (fetch, pull, push, etc.), general branch checkout/rename/deletion (branches can be created only through task preparation), discard, merge/rebase/conflict-resolution UI, history rewriting, arbitrary-line staging, stash apply/delete, automatic AI calls, CI/build/merge execution, and Windows/Linux GUIs.
+- **Git execution policy:** The app does not run Git fsmonitor, hooks, or external signing programs. App-created commits do not run hooks and are unsigned, including when `commit.gpgsign=true`. Configured external clean/smudge/process commands cause status/diff reads, preparation, and writes to be rejected. Global LFS filter commands trigger this restriction even when the repository does not use LFS. In the repository, inspect configured commands with `git config --show-origin --get-regexp '^filter\..*\.(clean|smudge|process)$'`.
 - **Preparation and writes:** Working directories are prepared without changing the original checkout. A changed source snapshot or trust basis stops execution; there is no silent replanning or recovery through reset/clean. Recipes are not an OS security sandbox.
 - **Display and resources:** Graph and branch history show at most 80 recent commits. Diff display is capped at 5,000 lines and 512 KiB. Speed, memory, and energy use on large repositories have not been measured.
-- **Development-stage UX:** Some lookup failures, lost-response notices, and preparation-button states still need work. A read already started in the engine may continue after the client cancels it.
+- **Development-stage UX:** Notices for some lookup failures and lost responses, and the consistency of preparation-button state, still have known issues. A read already started in the engine may continue after the client cancels it.
 - **Distribution:** The `.app` uses an ad-hoc development signature. Notarization, an installer, OS-level input testing, and VoiceOver validation are not complete.
 
 See [limitations and known issues (Korean)](docs/limitations.md) for details.
@@ -90,7 +90,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-On 2026-10-22, **62 Rust tests and 51 Swift tests** passed both in the developer checkout and in a separate copy containing only the files selected for publication. CLI, native-protocol, and app-startup smoke scenarios using synthetic repositories also passed. There is no CI yet. These results do not establish behavior on real user repositories or performance on large repositories.
+On 2026-10-22, **62 Rust tests and 51 Swift tests** passed in the tested environment above, both in the developer checkout and in a separate copy containing only the files selected for publication. CLI, native-protocol, and app-startup smoke scenarios using synthetic repositories also passed. There is no CI yet. These results do not establish behavior on real user repositories or performance on large repositories.
 
 Detailed guides are currently in Korean:
 
