@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TaskRequest",
+  "type": "object",
+  "properties": {
+    "group_id": {
+      "type": "string"
+    },
+    "label": {
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/Mode"
+    },
+    "repo_overrides": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Policy"
+      },
+      "default": {}
+    },
+    "task_slug": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "group_id",
+    "label",
+    "task_slug",
+    "mode"
+  ],
+  "$defs": {
+    "IosInputs": {
+      "type": "object",
+      "properties": {
+        "local_build": {
+          "type": "string"
+        },
+        "marketing_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "marketing_version",
+        "local_build"
+      ]
+    },
+    "Mode": {
+      "type": "string",
+      "enum": [
+        "branch_only",
+        "materialize"
+      ]
+    },
+    "Policy": {
+      "type": "object",
+      "properties": {
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IosInputs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recipe": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

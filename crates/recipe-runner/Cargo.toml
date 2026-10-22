@@ -1,0 +1,11 @@
+[package]
+name = "workbench-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+workbench-domain = { path = "../domain" }
+workbench-git = { path = "../git-adapter" }

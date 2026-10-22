@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Workspace",
+  "type": "object",
+  "properties": {
+    "groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BranchGroup"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "policy": {
+      "$ref": "#/$defs/Policy",
+      "default": {
+        "base_ref": null,
+        "branch_pattern": null,
+        "inputs": null,
+        "recipe": null
+      }
+    },
+    "recipes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Recipe"
+      }
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Repository"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "templates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TaskTemplate"
+      }
+    },
+    "user_defaults": {
+      "$ref": "#/$defs/Policy",
+      "default": {
+        "base_ref": null,
+        "branch_pattern": null,
+        "inputs": null,
+        "recipe": null
+      }
+    },
+    "worktree_root": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "worktree_root",
+    "repositories",
+    "groups",
+    "templates",
+    "recipes"
+  ],
+  "$defs": {
+    "BranchGroup": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "parent_group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/Policy",
+          "default": {
+            "base_ref": null,
+            "branch_pattern": null,
+            "inputs": null,
+            "recipe": null
+          }
+        },
+        "template_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ]
+    },
+    "IosInputs": {
+      "type": "object",
+      "properties": {
+        "local_build": {
+          "type": "string"
+        },
+        "marketing_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "marketing_version",
+        "local_build"
+      ]
+    },
+    "Policy": {
+      "type": "object",
+      "properties": {
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IosInputs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recipe": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Recipe": {
+      "type": "object",
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "repo_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "script": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "trusted_hash": {
+          "description": "Only the explicit local `trust` command writes this pin. No RPC can change it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "writes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repo_id",
+        "revision",
+        "executable",
+        "script",
+        "writes",
+        "timeout_seconds",
+        "target",
+        "configuration"
+      ]
+    },
+    "Repository": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path"
+      ]
+    },
+    "TaskTemplate": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "repos": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Policy"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repos"
+      ]
+    }
+  }
+}

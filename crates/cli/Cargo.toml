@@ -1,0 +1,14 @@
+[package]
+name = "workbench-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[[bin]]
+name = "workbench"
+path = "src/main.rs"
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+workbench-domain = { path = "../domain" }
+workbench-service = { path = "../operation-service" }

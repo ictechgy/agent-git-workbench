@@ -1,0 +1,27 @@
+/target/
+**/target/
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
+/archive/tauri-spike/src-tauri/gen/
+*.sock
+.DS_Store
+*.sqlite*
+.workbench/
+__pycache__/
+*.pyc
+
+**/.build/
+**/.swiftpm/
+/build/
+
+# Local agent sessions and review evidence
+/.omx/
+/.omc/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key

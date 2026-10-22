@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plan",
+  "type": "object",
+  "properties": {
+    "config_hash": {
+      "type": "string"
+    },
+    "expires_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "id": {
+      "type": "string"
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PlannedRepo"
+      }
+    },
+    "request": {
+      "$ref": "#/$defs/TaskRequest"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "snapshot_hash": {
+      "type": "string"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "request",
+    "config_hash",
+    "snapshot_hash",
+    "expires_at",
+    "repos",
+    "warnings"
+  ],
+  "$defs": {
+    "IosInputs": {
+      "type": "object",
+      "properties": {
+        "local_build": {
+          "type": "string"
+        },
+        "marketing_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "marketing_version",
+        "local_build"
+      ]
+    },
+    "Mode": {
+      "type": "string",
+      "enum": [
+        "branch_only",
+        "materialize"
+      ]
+    },
+    "PlannedRepo": {
+      "type": "object",
+      "properties": {
+        "base_oid": {
+          "type": "string"
+        },
+        "base_ref": {
+          "type": "string"
+        },
+        "branch_ref": {
+          "type": "string"
+        },
+        "common_id": {
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/Policy"
+        },
+        "policy_origins": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "recipe_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo_id": {
+          "type": "string"
+        },
+        "source_snapshot": {
+          "$ref": "#/$defs/SnapshotSummary"
+        },
+        "worktree_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_id",
+        "common_id",
+        "base_ref",
+        "base_oid",
+        "branch_ref",
+        "worktree_path",
+        "source_snapshot",
+        "policy",
+        "policy_origins"
+      ]
+    },
+    "Policy": {
+      "type": "object",
+      "properties": {
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IosInputs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recipe": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SnapshotSummary": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "files_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "head": {
+          "type": "string"
+        },
+        "index_hash": {
+          "type": "string"
+        },
+        "snapshot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "head",
+        "branch",
+        "index_hash",
+        "snapshot_hash",
+        "files_count"
+      ]
+    },
+    "TaskRequest": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/Mode"
+        },
+        "repo_overrides": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Policy"
+          },
+          "default": {}
+        },
+        "task_slug": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "group_id",
+        "label",
+        "task_slug",
+        "mode"
+      ]
+    }
+  }
+}

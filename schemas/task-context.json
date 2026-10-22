@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TaskContextBundle",
+  "type": "object",
+  "properties": {
+    "context": {
+      "$ref": "#/$defs/TaskContext"
+    },
+    "verifications": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/VerificationReceipt"
+      }
+    }
+  },
+  "required": [
+    "context",
+    "verifications"
+  ],
+  "$defs": {
+    "EvidenceKind": {
+      "type": "string",
+      "enum": [
+        "git_check",
+        "human_report",
+        "ai_report"
+      ]
+    },
+    "TaskContext": {
+      "type": "object",
+      "properties": {
+        "criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requirements_hash": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "purpose",
+        "criteria",
+        "references",
+        "notes",
+        "requirements_hash"
+      ]
+    },
+    "Verdict": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "unknown"
+      ]
+    },
+    "VerificationReceipt": {
+      "type": "object",
+      "properties": {
+        "after_snapshot_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "finished_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "head": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "note": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo_id": {
+          "type": "string"
+        },
+        "requirements_hash": {
+          "type": "string"
+        },
+        "snapshot_hash": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repo_id",
+        "path",
+        "branch",
+        "head",
+        "snapshot_hash",
+        "requirements_hash",
+        "kind",
+        "verdict",
+        "started_at",
+        "finished_at",
+        "command",
+        "note",
+        "output",
+        "truncated"
+      ]
+    }
+  }
+}

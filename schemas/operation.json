@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Operation",
+  "type": "object",
+  "properties": {
+    "cancel_requested": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "materialize": {
+      "type": "boolean"
+    },
+    "payload_hash": {
+      "type": "string"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TaskRepo"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "task_id",
+    "plan_id",
+    "idempotency_key",
+    "payload_hash",
+    "status",
+    "materialize",
+    "cancel_requested",
+    "repos",
+    "warnings"
+  ],
+  "$defs": {
+    "IosInputs": {
+      "type": "object",
+      "properties": {
+        "local_build": {
+          "type": "string"
+        },
+        "marketing_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "marketing_version",
+        "local_build"
+      ]
+    },
+    "PlannedRepo": {
+      "type": "object",
+      "properties": {
+        "base_oid": {
+          "type": "string"
+        },
+        "base_ref": {
+          "type": "string"
+        },
+        "branch_ref": {
+          "type": "string"
+        },
+        "common_id": {
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/Policy"
+        },
+        "policy_origins": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "recipe_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo_id": {
+          "type": "string"
+        },
+        "source_snapshot": {
+          "$ref": "#/$defs/SnapshotSummary"
+        },
+        "worktree_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_id",
+        "common_id",
+        "base_ref",
+        "base_oid",
+        "branch_ref",
+        "worktree_path",
+        "source_snapshot",
+        "policy",
+        "policy_origins"
+      ]
+    },
+    "Policy": {
+      "type": "object",
+      "properties": {
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IosInputs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recipe": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RepoState": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "branch_intent",
+        "branch_created",
+        "waiting_for_worktree",
+        "materializing",
+        "checked_out",
+        "preparing",
+        "ready",
+        "failed",
+        "cancelled",
+        "needs_recovery"
+      ]
+    },
+    "SnapshotSummary": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "files_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "head": {
+          "type": "string"
+        },
+        "index_hash": {
+          "type": "string"
+        },
+        "snapshot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "head",
+        "branch",
+        "index_hash",
+        "snapshot_hash",
+        "files_count"
+      ]
+    },
+    "TaskRepo": {
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "$ref": "#/$defs/PlannedRepo"
+        },
+        "postcondition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IosInputs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/RepoState"
+        }
+      },
+      "required": [
+        "plan",
+        "state",
+        "attempts"
+      ]
+    }
+  }
+}
