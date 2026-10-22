@@ -457,9 +457,17 @@ public final class WorkbenchStore: ObservableObject {
       readingSession = ReviewSession()
       onlyUnreviewedFiles = false
     }
-    operations = []
-    pinnedOperations = [:]
-    unresolvedOperationIDs = []
+    if restoring {
+      // Retain only known running targets for explicit cancellation if metadata
+      // recovery fails. These summaries cannot authorize preparation or edits.
+      operations.removeAll { !$0.isRunning }
+      pinnedOperations = pinnedOperations.filter { $0.value.isRunning }
+      unresolvedOperationIDs = Set(operations.map(\.id)).union(pinnedOperations.keys)
+    } else {
+      operations = []
+      pinnedOperations = [:]
+      unresolvedOperationIDs = []
+    }
     contextOperationID = restoredContext
     stashes = []
     stashError = nil
@@ -477,6 +485,7 @@ public final class WorkbenchStore: ObservableObject {
     lastUpdated = nil
     validatingSelection = true
     showingWelcome = false
+    configureTaskContext()
     // A prior workspace read may still be finishing. It cannot publish after generation changed.
     while refreshing { try await Task.sleep(for: .milliseconds(20)) }
     await refresh()

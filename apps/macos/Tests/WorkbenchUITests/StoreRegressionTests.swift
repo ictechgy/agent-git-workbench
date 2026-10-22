@@ -612,6 +612,10 @@ private final class ScopedContextReplies: @unchecked Sendable {
   var paginated = false
   var lookupFails = false
   var listFails = false
+  var holdList = false
+  var workspaceID = "space"
+  let arrived = Flag()
+  let gate = DispatchSemaphore(value: 0)
   var statusFails = false
   var preparationState = "ready"
   var preparationCalls: [String] = []
@@ -622,9 +626,16 @@ private final class ScopedContextReplies: @unchecked Sendable {
   func respond(_ request: [String: Any]) -> [String: Any] {
     let method = request["method"] as? String ?? ""
     let params = request["params"] as? [String: Any] ?? [:]
+    let hold = lock.withLock {
+      if method == "list_operations", holdList { holdList = false; return true }
+      return false
+    }
+    if hold { arrived.value = true; _ = gate.wait(timeout: .now() + .seconds(5)) }
     let specialized: [String: Any]? = lock.withLock {
       var result: Any
       switch method {
+      case "list_workspaces":
+        result = [["schema_version": 1, "id": workspaceID, "repositories": [["id": "a", "path": "/tmp/synthetic"]], "groups": []]]
       case "list_operations":
         if listFails { return ["schema_version": 1, "error": ["code": "list_failed", "message": "synthetic operation list failure"]] }
         result = paginated
@@ -945,18 +956,93 @@ private final class ScopedContextReplies: @unchecked Sendable {
   }
 }
 
-@Test @MainActor func unresolvedRunningOperationStillAllowsExplicitCancellation() async throws {
+@Test(arguments: [false, true], [false, true]) @MainActor
+func unresolvedRunningOperationStillAllowsExplicitCancellation(reconnect: Bool, pinned: Bool) async throws {
   let replies = ScopedContextReplies(); replies.preparationState = "running"
   let server = try TestService { replies.respond($0) }
   let store = WorkbenchStore(socketPath: server.path); await store.connect()
   let op = try #require(store.operations.first)
   store.selectTask(op); try await settleSelection(store)
+  if pinned {
+    replies.lock.withLock { replies.paginated = true }
+    await store.refresh()
+    #expect(!store.operations.contains { $0.id == op.id })
+    #expect(store.contextOperation?.id == op.id)
+  }
   replies.lock.withLock { replies.listFails = true }
-  await store.refresh()
+  if reconnect { await store.connect() } else { await store.refresh() }
   let eligibility = store.preparationEligibility(for: op.id)
+  #expect(store.contextOperation?.id == op.id); #expect(store.hasRunningOperation)
+  #expect(store.taskInformationUnavailable); #expect(!store.canEdit); #expect(!store.taskContext.loaded)
   #expect(eligibility.cancel); #expect(!eligibility.retry && !eligibility.materialize && !eligibility.recovery)
   await store.operate("cancel_operation", op: op)
   #expect(replies.lock.withLock { replies.preparationCalls } == ["cancel_operation"])
+  replies.lock.withLock { replies.listFails = false; replies.preparationState = "ready" }
+  await store.refresh()
+  #expect(!store.preparationEligibility(for: op.id).cancel); #expect(!store.hasRunningOperation)
+  #expect(!store.taskInformationUnavailable); #expect(store.taskContext.loaded); #expect(store.canEdit)
+}
+
+@Test(arguments: [false, true]) @MainActor
+func reconnectBlocksRetainedTaskContextBeforeOperationMetadataArrives(originalFolder: Bool) async throws {
+  let replies = ScopedContextReplies(); replies.preparationState = "running"
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let op = try #require(store.operations.first)
+  store.selectTask(op); try await settleSelection(store)
+  if originalFolder { store.select(.init(repoId: "a")); try await settleSelection(store) }
+  store.taskContext.draft?.notes = "retain reconnect notes"
+  let contextRequests = replies.lock.withLock { replies.requests.count }
+  replies.lock.withLock { replies.holdList = true; replies.listFails = true }
+  let reconnect = Task { await store.connect() }; try await wait(replies.arrived)
+  #expect(store.contextOperation?.id == op.id); #expect(store.contextTaskInformationUnavailable)
+  #expect(!store.taskContext.loaded); #expect(!store.canEdit)
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.requests.count } == contextRequests)
+  replies.gate.signal(); await reconnect.value
+  let eligibility = store.preparationEligibility(for: op.id)
+  #expect(eligibility.cancel); #expect(!eligibility.materialize && !eligibility.retry && !eligibility.recovery)
+  #expect(store.taskInformationLookupFailed); #expect(!store.canEdit); #expect(!store.taskContext.loaded)
+  await store.operate("materialize", op: op); await store.operate("retry_operation", op: op)
+  store.beginRecovery(op); await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.preparationCalls.isEmpty })
+  #expect(replies.lock.withLock { replies.requests.count } == contextRequests)
+  #expect(!store.showTaskSheet); #expect(store.recoveryTaskID == nil)
+  #expect(store.taskContext.draft?.notes == "retain reconnect notes")
+  replies.lock.withLock { replies.listFails = false; replies.preparationState = "ready" }
+  await store.refresh()
+  #expect(!store.preparationEligibility(for: op.id).cancel); #expect(!store.hasRunningOperation)
+  #expect(store.taskContext.loaded); #expect(store.canEdit)
+  #expect(store.taskContext.draft?.notes == "retain reconnect notes")
+}
+
+@Test(arguments: [false, true]) @MainActor
+func reconnectCancellationMetadataDoesNotCrossWorkspaces(sameSocket: Bool) async throws {
+  let first = ScopedContextReplies(); first.preparationState = "running"
+  let second = ScopedContextReplies(); second.listFails = true
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  let op = try #require(store.operations.first)
+  store.selectTask(op); try await settleSelection(store)
+  first.lock.withLock { first.paginated = true }
+  await store.refresh() // The running target is now held only by the selected Task pin.
+  #expect(!store.operations.contains { $0.id == op.id }); #expect(store.contextOperation?.id == op.id)
+  first.lock.withLock { first.listFails = true; if sameSocket { first.workspaceID = "other-space" } }
+  if !sameSocket { store.socketPath = serverB.path }
+  await store.connect()
+  #expect(store.operations.isEmpty); #expect(store.contextOperation == nil); #expect(!store.hasRunningOperation)
+  #expect(!store.preparationEligibility(for: op.id).cancel); #expect(!store.canEdit)
+  await store.operate("cancel_operation", op: op)
+  #expect(first.lock.withLock { first.preparationCalls.isEmpty })
+  #expect(second.lock.withLock { second.preparationCalls.isEmpty })
+
+  first.lock.withLock { first.workspaceID = "space" }
+  store.socketPath = serverA.path; await store.connect()
+  #expect(store.selection?.opId == op.id); #expect(store.contextTaskInformationUnavailable)
+  #expect(store.contextOperation == nil); #expect(!store.hasRunningOperation)
+  #expect(!store.preparationEligibility(for: op.id).cancel)
+  await store.operate("cancel_operation", op: op)
+  #expect(first.lock.withLock { first.preparationCalls.isEmpty })
 }
 
 @Test @MainActor func submissionTransportAndDecodeFailuresKeepOriginWarningAcrossSwitches() async throws {
