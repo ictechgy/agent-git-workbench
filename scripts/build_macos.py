@@ -22,7 +22,7 @@ def main():
                     "--product", "AgentGitWorkbench"], check=True)
     binary_dir = Path(subprocess.check_output(["swift", "build", "--package-path", str(package),
                     "-c", args.configuration, "--show-bin-path"], text=True).strip())
-    bundle = ROOT / "build/macos/Agent Git Workbench.app"
+    bundle = ROOT / "build/macos/River.app"
     executable = bundle / "Contents/MacOS"
     resources = bundle / "Contents/Resources"
     helpers = bundle / "Contents/Helpers"
@@ -35,7 +35,7 @@ def main():
     if icon.exists():
         shutil.copy2(icon, resources / "AppIcon.icns")
     info = {"CFBundleExecutable": "AgentGitWorkbench", "CFBundleIdentifier": "dev.workbench.AgentGitWorkbench",
-            "CFBundleName": "Agent Git Workbench", "CFBundleDisplayName": "Agent Git Workbench",
+            "CFBundleName": "River", "CFBundleDisplayName": "River",
             "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "1",
             "CFBundleIconFile": "AppIcon", "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
             "NSPrincipalClass": "NSApplication"}

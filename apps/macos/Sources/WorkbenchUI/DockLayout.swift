@@ -63,6 +63,12 @@ public indirect enum DockNode: Codable, Equatable, Sendable, Identifiable {
     }
   }
   public func contains(_ pane: WorkbenchPane) -> Bool { panes.contains(pane) }
+  public func isVisible(_ pane: WorkbenchPane) -> Bool {
+    switch self {
+    case .tabs(_, _, let active): active == pane
+    case .split(_, _, _, let first, let second): first.isVisible(pane) || second.isVisible(pane)
+    }
+  }
   fileprivate func removing(_ pane: WorkbenchPane) -> Self? {
     switch self {
     case .tabs(let id, let panes, let active):
@@ -150,6 +156,7 @@ public struct DockLayout: Codable, Equatable, Sendable {
   public init(root: DockNode?) { self.root = root }
   public var panes: [WorkbenchPane] { root?.panes ?? [] }
   public func contains(_ pane: WorkbenchPane) -> Bool { root?.contains(pane) == true }
+  public func isVisible(_ pane: WorkbenchPane) -> Bool { root?.isVisible(pane) == true }
   public var validated: Self? {
     guard let root else { return self }
     return root.validated().map { Self(root: $0) }
@@ -167,6 +174,14 @@ public struct DockLayout: Codable, Equatable, Sendable {
   public func selecting(_ pane: WorkbenchPane) -> Self { Self(root: root?.selecting(pane)) }
   public func resizing(_ split: String, ratio: Double) -> Self {
     Self(root: root?.resizing(split, ratio: ratio)).validated ?? self
+  }
+  public static var focused: Self {
+    Self(root: .divided(.horizontal, 0.18, .group([.files]), .group([.diff])))
+  }
+  public static var balanced: Self {
+    Self(root: .divided(.horizontal, 0.78,
+      .divided(.horizontal, 0.23, .group([.files]), .group([.diff])),
+      .group([.commit, .stash, .details], active: .commit)))
   }
   public static func legacy(_ value: LayoutConfiguration) -> Self {
     let review = DockNode.divided(.horizontal, 0.24, .group([.files]), .group([.diff]))

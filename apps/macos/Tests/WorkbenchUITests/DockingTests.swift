@@ -46,10 +46,15 @@ func arbitraryDockingPersistsRatiosTabsVisibilityAndUndo() throws {
   let defaults = UserDefaults(suiteName: suite)!
   defer { defaults.removePersistentDomain(forName: suite) }
   let layout = LayoutPreferences(defaults: defaults)
+  layout.apply(.classic)
   layout.dockPane(.stash, nextTo: .files, edge: .left)
   layout.dockPane(.graph, nextTo: .commit, edge: .bottom)
   layout.dockPane(.files, nextTo: .diff, edge: .center)
   layout.selectPane(.diff)
+  #expect(layout.dockLayout.contains(.files))
+  #expect(!layout.dockLayout.isVisible(.files))
+  #expect(layout.dockLayout.isVisible(.diff))
+  #expect(layout.dockLayout.isVisible(.stash))
   let beforeResize = layout.dockLayout
   layout.resizeDock(try #require(beforeResize.root).id, ratio: 0.62)
   let restored = LayoutPreferences(defaults: defaults)
@@ -92,6 +97,7 @@ func dragTargetsUsePaneGeometryAndCancelOutsideWorkspace() {
   let defaults = UserDefaults(suiteName: suite)!
   defer { defaults.removePersistentDomain(forName: suite) }
   let layout = LayoutPreferences(defaults: defaults)
+  layout.apply(.classic)
   let drag = DockDragSession()
   drag.bounds = CGRect(x: 0, y: 0, width: 1200, height: 800)
   drag.frames = [.diff: CGRect(x: 200, y: 200, width: 600, height: 400)]

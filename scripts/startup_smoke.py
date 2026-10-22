@@ -60,7 +60,7 @@ def snapshot(repo):
 
 
 def main():
-    helper = ROOT / "build/macos/Agent Git Workbench.app/Contents/Helpers/workbench"
+    helper = ROOT / "build/macos/River.app/Contents/Helpers/workbench"
     bin_dir = Path(run("swift", "build", "--package-path", ROOT / "apps/macos", "--show-bin-path").strip())
     probe = bin_dir / "workbench-startup-probe"
     # Finder-like launch: no WORKBENCH_SOCKET, WORKBENCH_SERVICE, or developer PATH.

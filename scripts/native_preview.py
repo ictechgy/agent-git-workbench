@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--verify-preparation-readiness", action="store_true", help="verify unfinished task is read-only and original/Ready sibling remain editable")
     parser.add_argument("--verify-review-continuity", action="store_true", help="verify mounted diff scrolling, reading checkpoint, external edits and selected-hunk handoff")
     parser.add_argument("--verify-task-context", action="store_true", help="verify saved purpose, observed/reported evidence, stale context and multi-repo handoff")
-    parser.add_argument("--layout", choices=["classic", "review", "tracks"], default="classic")
+    parser.add_argument("--layout", choices=["focus", "balanced", "classic", "review", "tracks"], default="focus")
     parser.add_argument("--graph", choices=["top", "bottom", "hidden"])
     parser.add_argument("--verify-layout", action="store_true", help="verify persistence and unchanged live Git review across layout changes")
     parser.add_argument("--layout-settings", action="store_true", help="render the actual layout settings content")

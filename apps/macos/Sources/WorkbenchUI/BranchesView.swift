@@ -156,6 +156,7 @@ public struct BranchesView: View {
   @ObservedObject private var store: WorkbenchStore
   @StateObject private var model: BranchBrowserModel
   private let close: () -> Void
+  @FocusState private var searchFocused: Bool
   public init(
     store: WorkbenchStore, model: BranchBrowserModel = BranchBrowserModel(),
     close: @escaping () -> Void = {}
@@ -166,21 +167,16 @@ public struct BranchesView: View {
   }
   public var body: some View {
     VStack(spacing: 0) {
-      HStack(spacing: 16) {
-        VStack(alignment: .leading, spacing: 5) {
-          Text("\(store.selection?.repoId ?? "저장소") · 전체 브랜치").font(
-            .system(size: 18, weight: .semibold))
-          Text("브랜치를 선택해 커밋 기록과 연결된 폴더를 살펴보세요.")
-            .font(.system(size: 12)).foregroundStyle(.secondary)
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: 16) { heading; Spacer(minLength: 8); headerActions }
+        VStack(alignment: .leading, spacing: 10) {
+          heading
+          HStack { Spacer(minLength: 0); headerActions }
         }
-        Spacer()
-        Button("새로고침", systemImage: "arrow.clockwise") { Task { await model.load(store, retryHistory: true) } }
-          .disabled(model.loading)
-        Button("닫기", action: close)
-      }.padding(20)
+      }.padding(16).background(WorkbenchTheme.panel)
       if let error = model.error {
         Label(error, systemImage: "exclamationmark.triangle").font(.system(size: 12))
-          .foregroundStyle(.orange)
+          .foregroundStyle(WorkbenchTheme.warning)
           .padding(.horizontal, 20).padding(.bottom, 14).frame(
             maxWidth: .infinity, alignment: .leading)
       }
@@ -201,11 +197,27 @@ public struct BranchesView: View {
     }.background(WorkbenchTheme.canvas).tint(WorkbenchTheme.accent)
       .task(id: refreshKey) { await model.observe(store) }
   }
+  private var heading: some View {
+    VStack(alignment: .leading, spacing: 5) {
+      Text("\(store.selection?.repoId ?? "저장소") · 전체 브랜치")
+        .font(.system(size: 16, weight: .semibold)).lineLimit(1)
+        .help("\(store.selection?.repoId ?? "저장소") · 전체 브랜치")
+      Text("브랜치를 선택해 커밋 기록과 연결된 폴더를 살펴보세요.")
+        .font(.system(size: 12)).foregroundStyle(WorkbenchTheme.secondaryText)
+    }
+  }
+  private var headerActions: some View {
+    HStack(spacing: 8) {
+      Button("새로고침", systemImage: "arrow.clockwise") { Task { await model.load(store, retryHistory: true) } }
+        .disabled(model.loading)
+      Button("닫기", action: close)
+    }.fixedSize(horizontal: true, vertical: false)
+  }
   private var branchList: some View {
     VStack(spacing: 0) {
       HStack {
         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-        TextField("브랜치 검색", text: $model.query).textFieldStyle(.plain)
+        TextField("브랜치 검색", text: $model.query).textFieldStyle(.plain).focused($searchFocused)
         if !model.query.isEmpty {
           Button {
             model.query = ""
@@ -214,7 +226,10 @@ public struct BranchesView: View {
           }.buttonStyle(.plain)
             .accessibilityLabel("검색 지우기")
         }
-      }.padding(12).background(WorkbenchTheme.canvas, in: RoundedRectangle(cornerRadius: 7))
+      }.padding(12).background(WorkbenchTheme.elevated, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+          .strokeBorder(searchFocused ? WorkbenchTheme.accent : WorkbenchTheme.line,
+                        lineWidth: searchFocused ? 2 : 1).allowsHitTesting(false))
         .padding(14)
       if model.loading {
         ProgressView("브랜치 불러오는 중…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -236,7 +251,7 @@ public struct BranchesView: View {
           Section("원격 브랜치 · \(remote.count)") {
             ForEach(remote) { branch in branchRow(branch).tag(branch.fullRef) }
           }
-        }.listStyle(.sidebar)
+        }.listStyle(.sidebar).scrollContentBackground(.hidden)
           .overlay {
             if model.filteredBranches.isEmpty {
               Text(model.branches.isEmpty ? "아직 브랜치가 없습니다." : "검색과 일치하는 브랜치가 없습니다.")
@@ -258,7 +273,7 @@ public struct BranchesView: View {
           .middle)
         if branch.current {
           Label("보고 있는 폴더의 브랜치", systemImage: "checkmark.circle.fill").foregroundStyle(
-            WorkbenchTheme.accent)
+            WorkbenchTheme.accentText)
         } else if !branch.worktreePath.isEmpty {
           let original = store.workspace?.repositories.first { $0.id == store.selection?.repoId }?.path
           Label(branch.worktreePath == original ? "원래 프로젝트 폴더에서 사용 중" : "다른 작업 폴더에서 사용 중", systemImage: "folder").foregroundStyle(.secondary)
@@ -297,19 +312,22 @@ public struct BranchesView: View {
         } else {
           ScrollView(.vertical) {
             HStack(alignment: .top, spacing: 0) {
-              GraphCanvas(commits: model.commits).frame(
-                width: 92, height: CGFloat(model.commits.count * 36))
+              GraphCanvas(commits: model.commits, rowHeight: 52).frame(
+                width: 92, height: CGFloat(model.commits.count * 52))
               VStack(alignment: .leading, spacing: 0) {
                 ForEach(model.commits) { commit in
-                  HStack(spacing: 16) {
-                    Text(String(commit.oid.prefix(8))).font(.system(size: 11, design: .monospaced))
-                      .foregroundStyle(.secondary)
-                    Text(commit.subject).font(.system(size: 13)).frame(
-                      minWidth: 0, maxWidth: .infinity, alignment: .leading).lineLimit(1).truncationMode(.tail)
-                    Text(commit.author).font(.system(size: 11)).foregroundStyle(.secondary).frame(
-                      width: 70, alignment: .leading).lineLimit(1).truncationMode(.tail)
-                  }.frame(height: 36).padding(.trailing, 20).help(
-                    commit.subject + "\n" + commit.oid)
+                  VStack(alignment: .leading, spacing: 4) {
+                    Text(commit.subject).font(.system(size: 13))
+                      .frame(maxWidth: .infinity, alignment: .leading).lineLimit(1)
+                      .textSelection(.enabled)
+                    HStack(spacing: 10) {
+                      Text(String(commit.oid.prefix(8)))
+                        .font(.system(size: 11, design: .monospaced)).fixedSize()
+                      Text(commit.author).font(.system(size: 11)).lineLimit(1)
+                    }.foregroundStyle(WorkbenchTheme.secondaryText)
+                  }.frame(height: 52).padding(.trailing, 16).help(
+                    commit.subject + "\n" + commit.oid + "\n" + commit.author)
+                    .accessibilityElement(children: .combine)
                 }
               }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 12)
@@ -317,7 +335,8 @@ public struct BranchesView: View {
         }
         Divider()
         Text("선택한 브랜치의 최근 \(model.commits.count)개 커밋 · 최대 80개")
-          .font(.system(size: 11)).foregroundStyle(.secondary).padding(14)
+          .font(.system(size: 11)).foregroundStyle(WorkbenchTheme.secondaryText).padding(14)
+          .frame(maxWidth: .infinity, alignment: .leading).background(WorkbenchTheme.panel)
       } else {
         ContentUnavailableView("살펴볼 브랜치를 선택하세요", systemImage: "arrow.triangle.branch")
           .frame(maxWidth: .infinity, maxHeight: .infinity)

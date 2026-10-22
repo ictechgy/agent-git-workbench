@@ -14,7 +14,7 @@ public struct LayoutOptions: View {
         Text("패널 제목을 끌어 원하는 위치에 놓으세요. 가장자리는 영역 분할, 중앙은 탭 합치기입니다.")
           .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(
             horizontal: false, vertical: true)
-        HStack(spacing: 8) {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
           ForEach(LayoutPreset.allCases) { preset in
             Button {
               layout.apply(preset)
@@ -33,6 +33,9 @@ public struct LayoutOptions: View {
                     layout.preset == preset ? WorkbenchTheme.accent : WorkbenchTheme.line))
             }.buttonStyle(.plain)
           }
+        }
+        Picker("색상", selection: $layout.appearance) {
+          ForEach(WorkbenchAppearance.allCases, id: \.self) { Text($0.title).tag($0) }
         }
         Picker("저장소 탐색", selection: binding(\.navigation)) {
           ForEach(RepositoryLayout.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -55,10 +58,10 @@ public struct LayoutOptions: View {
           Text("변경한 구성은 자동으로 저장됩니다.")
             .font(.system(size: 11)).foregroundStyle(.secondary)
           Spacer()
-          Button("기본값 복구") { layout.apply(.classic) }
+          Button("집중 배치로 복구") { layout.apply(.focus) }
         }
       }.padding(22)
-    }.frame(width: 390, height: 610)
+    }.frame(width: 420, height: 650)
   }
   private func binding<T>(_ path: WritableKeyPath<LayoutConfiguration, T>) -> Binding<T> {
     Binding(
@@ -69,6 +72,8 @@ public struct LayoutOptions: View {
   }
   private func symbol(_ preset: LayoutPreset) -> String {
     switch preset {
+    case .focus: "rectangle.split.2x1"
+    case .balanced: "rectangle.split.3x1"
     case .classic: "rectangle.split.2x2"
     case .review: "rectangle.split.3x1"
     case .tracks: "rectangle.3.group"

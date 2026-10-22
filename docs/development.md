@@ -6,7 +6,7 @@ macOS 네이티브 앱은 `apps/macos`, 공통 Rust 엔진은 `crates`에 있습
 
 ```sh
 python3 scripts/build_macos.py
-open "build/macos/Agent Git Workbench.app"
+open "build/macos/River.app"
 ```
 
 기본값은 debug 빌드입니다. 로컬 release 빌드는 아래와 같습니다. notarization이나 배포 업로드를 수행하지 않습니다.
@@ -51,11 +51,14 @@ python3 scripts/startup_smoke.py
 위 프로세스 경계 검증의 Rust·Swift 빌드를 마친 뒤 실행합니다.
 
 ```sh
-python3 scripts/native_preview.py /tmp/workbench-dark.png --appearance dark --scene partial --stashes
+python3 scripts/native_preview.py /tmp/workbench-light.png --appearance light --layout focus --scene review
+python3 scripts/native_preview.py /tmp/workbench-dark.png --appearance dark --layout balanced --scene partial --stashes
 python3 scripts/native_preview.py /tmp/workbench-branches.png --appearance light --width 1100 --height 800 --scene waiting --branches --dock-scene branches
 ```
 
 실제 Rust 서비스와 새 합성 Git 상태에 연결한 SwiftUI/AppKit content view입니다. PNG와 같은 이름의 JSON에 사용한 fixture와 상태를 기록합니다. 데스크톱 전체 캡처나 OS 입력·접근성 검증으로 해석하지 않습니다.
+
+`--layout focus`는 파일·Diff의 2열 집중 배치, `--layout balanced`는 커밋·Stash·작업 정보 탭을 더한 3열 균형 배치를 사용합니다. `--appearance`는 배치와 독립적으로 적용합니다. 미리보기는 격리된 설정을 사용하므로 사용자가 저장한 앱 배치를 바꾸지 않습니다. 실제 앱에서는 **화면 구성**에서 배치와 색상을 각각 선택하며, 기존 저장 배치는 새 기본값으로 덮어쓰지 않습니다.
 
 ## 소스 안내
 

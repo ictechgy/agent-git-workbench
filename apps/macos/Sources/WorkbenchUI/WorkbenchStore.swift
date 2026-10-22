@@ -19,11 +19,27 @@ public struct WorkspaceTaskPlan: Sendable {
   fileprivate let socket: String
 }
 
+public struct TaskSubmissionWarning: Identifiable, Equatable {
+  public let id: String
+  public let workspaceTitle: String
+  public let workspacePath: String
+  public let message: String
+}
+
+public struct PreparationEligibility {
+  public let materialize: Bool
+  public let retry: Bool
+  public let recovery: Bool
+  public let cancel: Bool
+}
+
 @MainActor
 public final class WorkbenchStore: ObservableObject {
   @Published public var socketPath: String
   @Published public private(set) var workspace: WorkspaceInfo?
   @Published public private(set) var workspaceSession = UUID()
+  @Published public private(set) var planSession = UUID()
+  @Published public private(set) var submissionWarnings: [TaskSubmissionWarning] = []
   @Published public private(set) var operations: [WorkbenchOperation] = []
   @Published public private(set) var tasks: [String: TaskDetail] = [:]
   @Published public private(set) var selection: WorktreeSelection?
@@ -153,7 +169,6 @@ public final class WorkbenchStore: ObservableObject {
   }
 
   private var client: ServiceClient?
-  private var planSession = UUID()
   private var generation = UUID()
   private var diffGeneration = UUID()
   private var diffRequest: Task<FileDiff, any Error>?
@@ -239,7 +254,7 @@ public final class WorkbenchStore: ObservableObject {
     if let currentWorkspace { await openRecent(currentWorkspace) } else { await connect() }
   }
   public func stopIdleServices() async { await runtime.stopIdleServices() }
-  private func openWorkspace(message: String, work: () async throws -> WorkspaceSession) async {
+  func openWorkspace(message: String, work: () async throws -> WorkspaceSession) async {
     guard !busy else { return }
     busy = true
     startupMessage = message
@@ -252,9 +267,7 @@ public final class WorkbenchStore: ObservableObject {
     do {
       let session = try await work()
       let returningToSameWorkspace = connectedSocketPath == session.socketPath
-      currentWorkspace = session.recent
-      socketPath = session.socketPath
-      try await connectToService()
+      try await connectToService(socket: session.socketPath, recent: session.recent)
       recentWorkspaces = try await runtime.recentWorkspaces()
       if session.recent.isExample && !returningToSameWorkspace && !restoredWorkspaceSelection { await selectFirstPreparedTaskAfterOpening() }
     } catch { report(error) }
@@ -292,9 +305,10 @@ public final class WorkbenchStore: ObservableObject {
     operation?.repos.first { $0.id == selection?.repoId }
   }
   public var taskTitle: String {
-    contextOperation.map { title(for: $0) }
+    if contextTaskInformationUnavailable { return taskInformationTitle }
+    return contextOperation.map { title(for: $0) }
       ?? (activeContextOperationID != nil ? "작업 정보 확인 필요" : selection?.repoId)
-      ?? "Agent Git Workbench"
+      ?? "River"
   }
   public var hasRunningOperation: Bool {
     operations.contains { $0.isRunning } || pinnedOperations.values.contains { $0.isRunning }
@@ -311,7 +325,11 @@ public final class WorkbenchStore: ObservableObject {
     return unresolvedOperationIDs.contains(id) || taskRepository == nil
   }
   public var taskInformationLookupFailed: Bool {
-    selection?.opId.map { unresolvedOperationIDs.contains($0) } ?? false
+    activeContextOperationID.map { unresolvedOperationIDs.contains($0) } ?? false
+  }
+  public var contextTaskInformationUnavailable: Bool {
+    guard let id = activeContextOperationID else { return false }
+    return unresolvedOperationIDs.contains(id) || contextOperation == nil
   }
   public var taskInformationTitle: String {
     taskInformationLookupFailed ? "작업 정보 확인 필요" : "작업 정보 확인 중…"
@@ -347,7 +365,9 @@ public final class WorkbenchStore: ObservableObject {
     return "이 작업 폴더의 준비가 끝나면 변경을 편집할 수 있습니다. 위 저장소의 상태와 오류를 확인해 주세요."
   }
   public func beginRecovery(_ operation: WorkbenchOperation) {
-    recoveryTaskID = operation.taskId
+    guard preparationEligibility(for: operation.id).recovery,
+      let current = operationSummary(for: operation.id) else { return }
+    recoveryTaskID = current.taskId
     showTaskSheet = true
   }
   public func nextTaskSlug(_ base: String) -> String {
@@ -363,6 +383,20 @@ public final class WorkbenchStore: ObservableObject {
   public var canEdit: Bool {
     !isViewingStash && repository != nil && repository?.conflict != true && !busy
       && !hasRunningOperation && !validatingSelection && !taskPreparationIncomplete && !contextWorking
+      && socketPath == connectedSocketPath
+  }
+  public func preparationEligibility(for id: String) -> PreparationEligibility {
+    let op = operationSummary(for: id)
+    let connected = client != nil && socketPath == connectedSocketPath && !busy
+    let resolved = connected && !unresolvedOperationIDs.contains(id) && op != nil
+    let canPrepare = resolved && !hasRunningOperation
+    return PreparationEligibility(
+      materialize: canPrepare && op?.canMaterialize == true && op?.requiresNewPlan != true,
+      retry: canPrepare && op?.canRetry == true && op?.requiresNewPlan != true,
+      recovery: canPrepare && op?.canRetry == true && op?.requiresNewPlan == true,
+      // Cancellation is a safety action against an already-known operation ID.
+      // The service verifies its current state; stale metadata must not trap a running job.
+      cancel: connected && op?.isRunning == true)
   }
   public func title(for op: WorkbenchOperation) -> String {
     tasks[op.taskId]?.request.label ?? op.repos.first?.plan.branchRef.components(separatedBy: "/")
@@ -374,23 +408,23 @@ public final class WorkbenchStore: ObservableObject {
     busy = true
     error = nil
     defer { busy = false }
+    let requestedSocket = socketPath
     do {
-      try await connectToService()
-    } catch { report(error) }
+      try await connectToService(socket: requestedSocket)
+    } catch {
+      if socketPath == requestedSocket, let connectedSocketPath { socketPath = connectedSocketPath }
+      report(error)
+    }
   }
-  private func connectToService() async throws {
-    planSession = UUID()
-    clearDiffFailure()
-    selectionCheckFailed = false
-    lastRefreshFailure = nil
-    let version = UUID()
-    generation = version
-    cancelDiffRead()
-    let candidate = ServiceClient(socketPath: socketPath)
+  // Keep every published workspace identity and client from the old connection
+  // until the candidate handshake succeeds. Failed candidates preserve its drafts.
+  private func connectToService(socket: String, recent: RecentWorkspace? = nil) async throws {
+    let requestedSocket = socketPath
+    let candidate = ServiceClient(socketPath: socket)
     let spaces: [WorkspaceInfo] = try await candidate.call("list_workspaces")
     guard let workspace = spaces.first else { throw UIError.emptyWorkspace }
-    guard generation == version else { return }
-    let restoring = connectedSocketPath == socketPath && self.workspace?.id == workspace.id
+    guard socketPath == requestedSocket else { throw UIError.workspaceChanged }
+    let restoring = connectedSocketPath == socket && self.workspace?.id == workspace.id
     rememberLocation()
     if let oldSocket = connectedSocketPath, let oldWorkspace = self.workspace {
       let oldKey = oldSocket + ":" + oldWorkspace.id
@@ -398,15 +432,24 @@ public final class WorkbenchStore: ObservableObject {
       workspaceSelections[oldKey] = selection
       workspaceContexts[oldKey] = contextOperationID
     }
-    let workspaceKey = socketPath + ":" + workspace.id
+    let workspaceKey = socket + ":" + workspace.id
     let restoredSelection = restoring ? selection : workspaceSelections[workspaceKey]
     let restoredContext = restoring ? contextOperationID : workspaceContexts[workspaceKey]
     restoredWorkspaceSelection = restoredSelection != nil
     self.client = candidate
     self.workspace = workspace
-    workspaceSession = planSession
-    connectedSocketPath = socketPath
+    currentWorkspace = recent ?? (restoring ? currentWorkspace : nil)
+    socketPath = socket
+    connectedSocketPath = socket
+    planSession = UUID()
+    generation = UUID()
+    cancelDiffRead()
+    clearDiffFailure()
+    selectionCheckFailed = false
+    lastRefreshFailure = nil
+    lastMetadataFailure = nil
     if !restoring {
+      workspaceSession = UUID()
       taskContext.reset()
       locationCache.removeAll()
       locationDrafts = workspaceDrafts[workspaceKey] ?? [:]
@@ -520,7 +563,14 @@ public final class WorkbenchStore: ObservableObject {
     }
   }
 
-  public func refresh() async {
+  public func refresh(forceDiff: Bool = false) async {
+    if forceDiff && refreshing {
+      let version = generation
+      while refreshing {
+        do { try await Task.sleep(for: .milliseconds(20)) } catch { return }
+        guard version == generation else { return }
+      }
+    }
     guard let client, !refreshing else { return }
     refreshing = true
     defer { refreshing = false }
@@ -528,7 +578,17 @@ public final class WorkbenchStore: ObservableObject {
     let location = selection
     var metadataFailures: [String] = []
     do {
-      let ops: [WorkbenchOperation] = try await client.call("list_operations")
+      let ops: [WorkbenchOperation]
+      do {
+        ops = try await client.call("list_operations")
+      } catch {
+        guard version == generation else { return }
+        unresolvedOperationIDs.formUnion(activeOperationIDs)
+        unresolvedOperationIDs.formUnion(operations.map(\.id))
+        unresolvedOperationIDs.formUnion(pinnedOperations.keys)
+        configureTaskContext()
+        throw error
+      }
       guard version == generation else { return }
       if operations != ops { operations = ops }
       let requiredIDs = activeOperationIDs
@@ -614,7 +674,8 @@ public final class WorkbenchStore: ObservableObject {
               let fallback = visibleFiles.first?.path ?? ""
               if selectedFile != fallback { selectedFile = fallback }
             }
-            if !selectedFile.isEmpty && (changed || diff?.path != selectedFile || diff?.staged != staged) { await loadDiff() }
+            if forceDiff { clearDiffFailure() }
+            if !selectedFile.isEmpty && (forceDiff || changed || diff?.path != selectedFile || diff?.staged != staged) { await loadDiff() }
           }
         }
         if isViewingStash {
@@ -625,7 +686,8 @@ public final class WorkbenchStore: ObservableObject {
               let fallback = visibleFiles.first?.path ?? ""
               if selectedFile != fallback { selectedFile = fallback }
             }
-            if diff?.path != selectedFile { await loadDiff() }
+            if forceDiff { clearDiffFailure() }
+            if forceDiff || diff?.path != selectedFile { await loadDiff() }
           }
         }
       }
@@ -659,8 +721,8 @@ public final class WorkbenchStore: ObservableObject {
     }
   }
   private func configureTaskContext() {
-    guard let client, let selection, let workspace else { return }
-    taskContext.configure(client: client, workspace: socketPath + ":" + workspace.id,
+    guard let client, let selection, let workspace, let connectedSocketPath else { return }
+    taskContext.configure(client: client, workspace: connectedSocketPath + ":" + workspace.id,
       location: selection, contextOperationID: activeContextOperationID, operation: contextOperation,
       operationResolved: activeContextOperationID.map { !unresolvedOperationIDs.contains($0) } ?? true,
       title: taskTitle)
@@ -819,10 +881,15 @@ public final class WorkbenchStore: ObservableObject {
     }
   }
   public func operate(_ method: String, op: WorkbenchOperation) async {
-    guard let client, !busy else { return }
-    if ["retry_operation", "materialize"].contains(method), op.requiresNewPlan {
-      beginRecovery(op); return
+    guard let client else { return }
+    let eligibility = preparationEligibility(for: op.id)
+    if ["retry_operation", "materialize"].contains(method), eligibility.recovery {
+      if let current = operationSummary(for: op.id) { beginRecovery(current) }
+      return
     }
+    guard (method == "materialize" && eligibility.materialize)
+      || (method == "retry_operation" && eligibility.retry)
+      || (method == "cancel_operation" && eligibility.cancel) else { return }
     await mutation {
       let _: WorkbenchOperation = try await client.call(method, params: ["op_id": .string(op.id)])
     }
@@ -839,8 +906,8 @@ public final class WorkbenchStore: ObservableObject {
         "group_id": .string(group), "label": .string(label), "task_slug": .string(slug),
         "mode": .string(mode),
       ])
-    guard planSession == session, self.client === client, socketPath == socket
-    else { throw UIError.workspaceChanged }
+    guard socketPath == socket, connectedSocketPath == socket else { throw UIError.workspaceChanged }
+    guard planSession == session, self.client === client else { throw UIError.planInvalidated }
     return WorkspaceTaskPlan(details: details, session: session, socket: socket)
   }
   public func listBranches() async throws -> [GitBranch] {
@@ -858,10 +925,22 @@ public final class WorkbenchStore: ObservableObject {
   }
   public func executePlan(_ plan: WorkspaceTaskPlan, key: String) async throws {
     guard let client else { throw UIError.notConnected }
-    guard plan.session == planSession, plan.socket == socketPath, socketPath == connectedSocketPath
-    else { throw UIError.workspaceChanged }
-    let op: WorkbenchOperation = try await client.call(
-      "execute_plan", params: ["plan_id": .string(plan.details.id), "idempotency_key": .string(key)])
+    guard plan.socket == socketPath, socketPath == connectedSocketPath else { throw UIError.workspaceChanged }
+    guard plan.session == planSession else { throw UIError.planInvalidated }
+    let originTitle = workspaceTitle
+    let originPath = currentWorkspace?.repositoryPath ?? workspace?.repositories.first?.path ?? plan.socket
+    let warningID = plan.socket + ":" + key
+    let op: WorkbenchOperation
+    do {
+      op = try await client.call(
+        "execute_plan", params: ["plan_id": .string(plan.details.id), "idempotency_key": .string(key)])
+    } catch {
+      guard !(error is ServiceFailure) else { throw error }
+      let warning = TaskSubmissionWarning(id: warningID, workspaceTitle: originTitle,
+        workspacePath: originPath, message: UIError.submissionOutcomeUnknown.localizedDescription)
+      if !submissionWarnings.contains(where: { $0.id == warningID }) { submissionWarnings.append(warning) }
+      throw UIError.submissionOutcomeUnknown
+    }
     guard plan.session == planSession, self.client === client, plan.socket == socketPath
     else {
       report(UIError.workspaceChangedAfterSubmission)
@@ -870,6 +949,9 @@ public final class WorkbenchStore: ObservableObject {
     if !operations.contains(where: { $0.id == op.id }) { operations.insert(op, at: 0) }
     selectTask(op)
     await refresh()
+  }
+  public func dismissSubmissionWarning(_ id: String) {
+    submissionWarnings.removeAll { $0.id == id }
   }
   private func mutation(_ work: () async throws -> Void) async {
     busy = true
@@ -903,7 +985,7 @@ public final class WorkbenchStore: ObservableObject {
 }
 
 enum UIError: LocalizedError {
-  case emptyWorkspace, notConnected, operationIdentityMismatch, workspaceChanged, workspaceChangedAfterSubmission
+  case emptyWorkspace, notConnected, operationIdentityMismatch, workspaceChanged, workspaceChangedAfterSubmission, submissionOutcomeUnknown, planInvalidated
   var errorDescription: String? {
     switch self {
     case .emptyWorkspace: "등록된 워크스페이스가 없습니다."
@@ -911,6 +993,8 @@ enum UIError: LocalizedError {
     case .operationIdentityMismatch: "선택한 작업과 다른 정보가 반환되었습니다. 새로고침해 주세요."
     case .workspaceChanged: "프로젝트가 바뀌었습니다. 현재 프로젝트에서 계획을 다시 확인해 주세요."
     case .workspaceChangedAfterSubmission: "프로젝트가 바뀌었습니다. 이전 요청의 실행 여부는 이전 프로젝트의 작업 목록에서 확인해 주세요."
+    case .submissionOutcomeUnknown: "작업 준비 요청의 접수 여부를 확인하지 못했습니다. 같은 요청을 반복하기 전에 이 프로젝트의 작업 목록과 실제 Git 상태를 확인해 주세요."
+    case .planInvalidated: "다시 연결하여 이전 계획을 사용할 수 없습니다. 입력은 유지했습니다. 현재 상태로 계획을 다시 확인해 주세요."
     }
   }
 }

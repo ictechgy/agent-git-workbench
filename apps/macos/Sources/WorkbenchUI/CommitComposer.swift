@@ -12,33 +12,34 @@ public final class CommitDraft: ObservableObject {
 struct CommitComposer: View {
   @ObservedObject var store: WorkbenchStore
   @ObservedObject var draft: CommitDraft
+  @FocusState private var messageFocused: Bool
   var body: some View {
     let snapshot = store.repository?.snapshotHash
     let location = store.selection
     return VStack(alignment: .leading, spacing: 12) {
-      HStack {
-        Text("커밋 · \(store.selection?.repoId ?? "저장소")").font(.system(size: 14, weight: .semibold))
-          .lineLimit(1)
-        Spacer(minLength: 2)
-        Text("\(store.stagedCount)개 파일").font(.system(size: 11)).foregroundStyle(.secondary)
-      }
       TextEditor(text: $draft.message).font(.system(size: 13)).scrollContentBackground(
         .hidden
       )
+      .focused($messageFocused)
       .padding(7).frame(height: 78)
-      .background(WorkbenchTheme.canvas, in: RoundedRectangle(cornerRadius: 7))
+      .foregroundStyle(WorkbenchTheme.primaryText)
+      .background(WorkbenchTheme.elevated, in: RoundedRectangle(cornerRadius: 6))
       .overlay(alignment: .topLeading) {
-        if store.commitMessage.isEmpty {
-          Text("무엇을 바꾸셨나요?").font(.system(size: 12)).foregroundStyle(.tertiary)
+        if draft.message.isEmpty {
+          Text("무엇을 바꾸셨나요?").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.secondaryText)
             .padding(12).allowsHitTesting(false)
         }
       }
-      .overlay(RoundedRectangle(cornerRadius: 7).stroke(WorkbenchTheme.line, lineWidth: 1))
+      .overlay(RoundedRectangle(cornerRadius: 6)
+        .strokeBorder(messageFocused ? WorkbenchTheme.accent : WorkbenchTheme.line,
+                      lineWidth: messageFocused ? 2 : 1).allowsHitTesting(false))
       .accessibilityLabel("커밋 메시지")
       Button {
         Task { await store.commit(expectedSnapshot: snapshot, at: location) }
       } label: {
-        Text("\(store.selection?.repoId ?? "저장소")에 커밋").font(.system(size: 13, weight: .medium))
+        Text("\(store.selection?.repoId ?? "저장소") · \(store.stagedCount)개 파일 커밋")
+          .font(.system(size: 13, weight: .medium))
+          .fixedSize(horizontal: false, vertical: true)
           .frame(maxWidth: .infinity)
       }.buttonStyle(PrimaryActionStyle()).controlSize(.large).keyboardShortcut(
         .return, modifiers: .command
@@ -49,22 +50,35 @@ struct CommitComposer: View {
       if store.isViewingStash {
         Button("현재 변경으로 돌아가기", systemImage: "arrow.uturn.backward") { store.showWorkingChanges() }
           .font(.system(size: 12)).buttonStyle(.link)
-      } else {
-        Text(commitHint).font(.system(size: 11)).foregroundStyle(.secondary)
+      }
+      if let reason = disabledReason {
+        Text(reason).font(.system(size: 12)).foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true).lineSpacing(2)
+      }
+      Text("Git hook·커밋 서명 없이 커밋합니다.")
+        .font(.system(size: 12)).foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+      if !store.isViewingStash {
         if let count = store.repository?.files.filter({ $0.index == "?" }).count, count > 0 {
           Text("새 파일 \(count)개는 이 커밋에 포함되지 않습니다. Git에서 내용을 확인하고 추가해 주세요.")
-            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .font(.system(size: 12)).foregroundStyle(WorkbenchTheme.warning)
+            .fixedSize(horizontal: false, vertical: true)
         }
       }
     }
   }
-  private var commitHint: String {
+  private var disabledReason: String? {
+    if store.isViewingStash { return "Stash는 읽기 전용입니다." }
+    if store.selectionCheckFailed { return "최신 상태를 확인하지 못했습니다. 새로고침 후 커밋하세요." }
     if store.repository?.conflict == true { return "충돌 또는 진행 중인 Git 작업을 해결하세요." }
     if store.taskPreparationIncomplete { return store.preparationHint }
     if store.hasRunningOperation { return "다른 저장소의 준비 작업이 끝나면 커밋할 수 있습니다." }
     if store.taskContext.working { return "검사나 작업 기록 수집이 끝나면 커밋할 수 있습니다." }
+    if store.busy { return "현재 작업이 끝나면 커밋할 수 있습니다." }
+    if store.validatingSelection || store.repository == nil { return "현재 폴더의 변경을 확인하고 있습니다." }
+    if !store.canEdit { return "작업공간 연결을 확인한 뒤 커밋할 수 있습니다." }
     if store.stagedCount == 0 { return "검토한 변경을 스테이징하면 커밋할 수 있습니다." }
-    return "선택한 저장소의 스테이징된 변경만 커밋합니다. 현재 버전은 hook·서명 없이 커밋합니다."
+    if draft.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "커밋 메시지를 입력하세요." }
+    return nil
   }
 }

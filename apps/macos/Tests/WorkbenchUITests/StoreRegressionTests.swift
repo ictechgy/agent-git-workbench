@@ -3,13 +3,14 @@ import Darwin
 import Foundation
 import Testing
 import WorkbenchProtocol
+@testable import WorkbenchRuntime
 @testable import WorkbenchUI
 
 // Private, synthetic Unix service. No app runtime, user repositories or app data.
 private final class TestService: @unchecked Sendable {
   let path = "/tmp/agw-state-\(UUID().uuidString.prefix(10)).sock"
   private let stop = Flag()
-  init(_ reply: @escaping @Sendable ([String: Any]) -> [String: Any]) throws {
+  init(_ reply: @escaping @Sendable ([String: Any]) -> [String: Any]?) throws {
     let listener = socket(AF_UNIX, SOCK_STREAM, 0)
     var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
     address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
@@ -36,7 +37,8 @@ private final class TestService: @unchecked Sendable {
             if data.contains(10) { break }
           }
           guard let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            var bytes = try? JSONSerialization.data(withJSONObject: reply(request)) else { return }
+            let response = reply(request),
+            var bytes = try? JSONSerialization.data(withJSONObject: response) else { return }
           bytes.append(10)
           bytes.withUnsafeBytes { raw in
             var offset = 0
@@ -173,6 +175,10 @@ private final class SubmissionReplies: @unchecked Sendable {
   let lock = NSLock()
   var heldMethod = ""
   var executeCalls = 0
+  var commitCalls = 0
+  var handshakeFails = false
+  var executeFailure = ""
+  var diffIsBinary = false
   var submittedMessage = ""
   let arrived = Flag()
   let gate = DispatchSemaphore(value: 0)
@@ -181,18 +187,34 @@ private final class SubmissionReplies: @unchecked Sendable {
     let params = request["params"] as? [String: Any] ?? [:]
     let hold = lock.withLock {
       if method == "execute_plan" { executeCalls += 1 }
-      if method == "commit" { submittedMessage = params["message"] as? String ?? "" }
+      if method == "commit" { commitCalls += 1; submittedMessage = params["message"] as? String ?? "" }
       return method == heldMethod
     }
     if hold { arrived.value = true; _ = gate.wait(timeout: .now() + .seconds(5)) }
     if method == "plan_task" {
       return ["schema_version": 1, "result": ["schema_version": 1, "id": "plan", "snapshot_hash": "code", "repos": [], "warnings": [], "expires_at": 9_999_999_999]]
     }
-    if method == "execute_plan" { return ["schema_version": 1, "result": operationJSON(id: "submitted-op")] }
+    if method == "list_workspaces", lock.withLock({ handshakeFails }) {
+      return ["schema_version": 1, "error": ["code": "workspace_failed", "message": "synthetic handshake failure"]]
+    }
+    if method == "execute_plan" {
+      switch lock.withLock({ executeFailure }) {
+      case "decode": return ["schema_version": 1, "result": ["broken": true]]
+      case "service": return ["schema_version": 1, "error": ["code": "preparation_queue_full", "message": "full"]]
+      default: return ["schema_version": 1, "result": operationJSON(id: "submitted-op")]
+      }
+    }
     var reply = base.respond(request)
     if method == "get_repo_status", var status = reply["result"] as? [String: Any] {
       status["files"] = [["path": "a.swift", "index": "M", "worktree": " "]]
       reply["result"] = status
+    }
+    if method == "get_diff", var diff = reply["result"] as? [String: Any] {
+      diff["staged"] = params["staged"] as? Bool ?? false
+      if lock.withLock({ diffIsBinary }) {
+        diff["hunks"] = [String](); diff["text"] = "Binary files differ"; diff["can_stage_hunks"] = false
+      }
+      reply["result"] = diff
     }
     return reply
   }
@@ -550,7 +572,8 @@ private func operation() throws -> WorkbenchOperation {
   let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
   let op = try decoder.decode(WorkbenchOperation.self, from: JSONSerialization.data(withJSONObject: operationJSON(drift: true)))
   #expect(op.requiresNewPlan); #expect(op.canRetry)
-  let replies = Replies(); let server = try TestService { replies.respond($0) }
+  let replies = ScopedContextReplies(); replies.preparationState = "drift"
+  let server = try TestService { replies.respond($0) }
   let store = WorkbenchStore(socketPath: server.path); await store.connect()
   await store.operate("retry_operation", op: op)
   #expect(store.showTaskSheet); #expect(store.recoveryTaskID == "task")
@@ -588,6 +611,10 @@ private final class ScopedContextReplies: @unchecked Sendable {
   private let base = Replies()
   var paginated = false
   var lookupFails = false
+  var listFails = false
+  var statusFails = false
+  var preparationState = "ready"
+  var preparationCalls: [String] = []
   var lookupIDs: [String] = []
   var requests: [Request] = []
   var contexts = ["repo": Context(purpose: "repository intent"), "op": Context(purpose: "Task intent")]
@@ -599,16 +626,22 @@ private final class ScopedContextReplies: @unchecked Sendable {
       var result: Any
       switch method {
       case "list_operations":
+        if listFails { return ["schema_version": 1, "error": ["code": "list_failed", "message": "synthetic operation list failure"]] }
         result = paginated
           ? (0..<100).map { operationJSON(id: "new-\($0)", taskID: "new-task-\($0)") }
-          : [operationJSON()]
+          : [currentOperation()]
       case "get_operation":
         let id = params["op_id"] as? String ?? ""
         lookupIDs.append(id)
         if lookupFails || id != "op" {
           return ["schema_version": 1, "error": ["code": "unknown_operation", "message": "synthetic lookup failure"]]
         }
-        result = operationJSON()
+        result = currentOperation()
+      case "retry_operation", "materialize", "cancel_operation":
+        preparationCalls.append(method); result = currentOperation()
+      case "get_repo_status":
+        if statusFails { return ["schema_version": 1, "error": ["code": "git_failed", "message": "synthetic status failure"]] }
+        return nil
       case "get_task":
         let id = params["task_id"] as? String ?? ""
         result = ["id": id, "operation_id": id == "task" ? "op" : id,
@@ -634,6 +667,17 @@ private final class ScopedContextReplies: @unchecked Sendable {
       return ["schema_version": 1, "result": result]
     }
     return specialized ?? base.respond(request)
+  }
+  private func currentOperation() -> [String: Any] {
+    if preparationState == "drift" { return operationJSON(drift: true) }
+    var op = operationJSON()
+    if preparationState != "ready" {
+      op["status"] = preparationState
+      op["repos"] = (op["repos"] as! [[String: Any]]).map { value in
+        var repo = value; repo["state"] = preparationState; return repo
+      }
+    }
+    return op
   }
 }
 
@@ -784,4 +828,211 @@ private final class ScopedContextReplies: @unchecked Sendable {
   #expect(!store.preparationHint.contains("읽지 못했습니다"))
   replies.gate.signal(); await reconnect.value
   #expect(!store.taskInformationUnavailable)
+}
+
+@Test @MainActor func failedWorkspaceHandshakeKeepsCommittedIdentityClientAndDrafts() async throws {
+  let first = SubmissionReplies(); first.base.diffFails = false
+  let second = SubmissionReplies(); second.handshakeFails = true; second.heldMethod = "list_workspaces"
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let isolated = URL(fileURLWithPath: "/tmp/river-store-runtime-\(UUID().uuidString)")
+  let store = WorkbenchStore(runtime: WorkspaceRuntime(storageDirectory: isolated, runtimeDirectory: isolated))
+  let recentA = RecentWorkspace(id: UUID(), name: "Project A", repositoryPath: "/tmp/project-a", isExample: false, lastOpened: Date())
+  let recentB = RecentWorkspace(id: UUID(), name: "Project B", repositoryPath: "/tmp/project-b", isExample: false, lastOpened: Date())
+  await store.openWorkspace(message: "A") { WorkspaceSession(recent: recentA, socketPath: serverA.path) }
+  store.commitMessage = "A commit draft"; store.taskContext.draft?.purpose = "A purpose draft"
+  let contextIdentity = store.taskContext.identity
+  let sheetIdentity = store.workspaceSession
+  let attempt = Task { await store.openWorkspace(message: "B") { WorkspaceSession(recent: recentB, socketPath: serverB.path) } }
+  try await wait(second.arrived)
+  #expect(store.workspaceTitle == "Project A"); #expect(store.socketPath == serverA.path)
+  #expect(!store.canEdit)
+  await store.commit()
+  #expect(first.lock.withLock { first.commitCalls } == 0)
+  second.gate.signal(); await attempt.value
+  #expect(store.workspaceTitle == "Project A"); #expect(store.socketPath == serverA.path)
+  #expect(store.workspaceSession == sheetIdentity); #expect(store.taskContext.identity == contextIdentity)
+  #expect(store.canEdit); #expect(store.commitMessage == "A commit draft")
+  #expect(store.taskContext.draft?.purpose == "A purpose draft")
+  // A directly edited developer socket must never authorize writes using client A.
+  store.socketPath = serverB.path
+  #expect(!store.canEdit); await store.commit()
+  second.lock.withLock { second.heldMethod = "" }
+  await store.connect()
+  #expect(store.socketPath == serverA.path); #expect(store.workspaceTitle == "Project A")
+  #expect(first.lock.withLock { first.commitCalls } == 0)
+  #expect(second.lock.withLock { second.commitCalls } == 0)
+  #expect(store.commitMessage == "A commit draft")
+  await store.commit()
+  #expect(first.lock.withLock { first.commitCalls } == 1)
+  #expect(second.lock.withLock { second.commitCalls } == 0)
+}
+
+@Test @MainActor func mutableDeveloperSocketCannotRebindInFlightHandshake() async throws {
+  let first = SubmissionReplies(); let second = SubmissionReplies(); second.heldMethod = "list_workspaces"
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  store.commitMessage = "A draft"
+  let sheetIdentity = store.workspaceSession
+  store.socketPath = serverB.path
+  let connection = Task { await store.connect() }; try await wait(second.arrived)
+  store.socketPath = "/tmp/never-connect-this.sock"
+  second.gate.signal(); await connection.value
+  #expect(store.workspaceSession == sheetIdentity); #expect(store.commitMessage == "A draft")
+  #expect(!store.canEdit); await store.commit()
+  #expect(first.lock.withLock { first.commitCalls } == 0)
+  #expect(second.lock.withLock { second.commitCalls } == 0)
+  store.socketPath = serverA.path
+  #expect(store.canEdit)
+}
+
+@Test @MainActor func unresolvedOperationDisablesEveryPreparationPathInOriginalFolder() async throws {
+  for state in ["waiting_for_worktree", "failed", "drift"] {
+    let replies = ScopedContextReplies(); replies.preparationState = state
+    let server = try TestService { replies.respond($0) }
+    let store = WorkbenchStore(socketPath: server.path); await store.connect()
+    let op = try #require(store.operations.first)
+    store.selectTask(op); try await settleSelection(store)
+    store.select(.init(repoId: "a")); try await settleSelection(store)
+    let before = store.preparationEligibility(for: op.id)
+    #expect(before.materialize || before.retry || before.recovery)
+    store.taskContext.draft?.notes = "retain notes"
+    replies.lock.withLock { replies.paginated = true; replies.lookupFails = true }
+    await store.refresh()
+    #expect(store.selection?.opId == nil); #expect(store.contextOperation?.id == op.id)
+    #expect(store.contextTaskInformationUnavailable); #expect(store.taskInformationLookupFailed)
+    #expect(store.taskTitle == "작업 정보 확인 필요")
+    let blocked = store.preparationEligibility(for: op.id)
+    #expect(!blocked.materialize && !blocked.retry && !blocked.recovery)
+    await store.operate("materialize", op: op); await store.operate("retry_operation", op: op)
+    store.beginRecovery(op)
+    #expect(!store.showTaskSheet); #expect(store.recoveryTaskID == nil)
+    #expect(replies.lock.withLock { replies.preparationCalls.isEmpty })
+    #expect(store.taskContext.draft?.notes == "retain notes")
+    replies.lock.withLock { replies.lookupFails = false }
+    await store.refresh()
+    let restored = store.preparationEligibility(for: op.id)
+    #expect(restored.materialize || restored.retry || restored.recovery)
+    #expect(store.taskContext.loaded); #expect(store.taskContext.draft?.notes == "retain notes")
+  }
+}
+
+@Test @MainActor func listFailureMarksTaskContextFailedAndStatusFailureDoesNot() async throws {
+  for originalFolder in [false, true] {
+    let replies = ScopedContextReplies(); let server = try TestService { replies.respond($0) }
+    let store = WorkbenchStore(socketPath: server.path); await store.connect()
+    store.selectTask(try #require(store.operations.first)); try await settleSelection(store)
+    if originalFolder { store.select(.init(repoId: "a")); try await settleSelection(store) }
+    store.taskContext.draft?.purpose = "retain purpose"; store.commitMessage = "retain commit"
+    replies.lock.withLock { replies.listFails = true }
+    await store.refresh()
+    #expect(store.taskInformationLookupFailed); #expect(store.contextTaskInformationUnavailable)
+    #expect(store.taskInformationTitle == "작업 정보 확인 필요"); #expect(!store.taskContext.loaded)
+    let calls = replies.lock.withLock { replies.requests.count }
+    await store.taskContext.save()
+    #expect(replies.lock.withLock { replies.requests.count } == calls)
+    #expect(store.selectionCheckFailed); #expect(!store.canEdit)
+    // Reconnect clears summaries before list failure; this must also be failed, not checking.
+    await store.connect()
+    #expect(store.taskInformationLookupFailed); #expect(store.taskTitle == "작업 정보 확인 필요")
+    replies.lock.withLock { replies.listFails = false }
+    await store.refresh()
+    #expect(!store.contextTaskInformationUnavailable); #expect(store.taskContext.loaded)
+    #expect(store.taskContext.draft?.purpose == "retain purpose"); #expect(store.commitMessage == "retain commit")
+    replies.lock.withLock { replies.statusFails = true }
+    await store.refresh()
+    #expect(!store.taskInformationLookupFailed); #expect(!store.contextTaskInformationUnavailable)
+    #expect(store.taskContext.loaded); #expect(store.selectionCheckFailed)
+  }
+}
+
+@Test @MainActor func unresolvedRunningOperationStillAllowsExplicitCancellation() async throws {
+  let replies = ScopedContextReplies(); replies.preparationState = "running"
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let op = try #require(store.operations.first)
+  store.selectTask(op); try await settleSelection(store)
+  replies.lock.withLock { replies.listFails = true }
+  await store.refresh()
+  let eligibility = store.preparationEligibility(for: op.id)
+  #expect(eligibility.cancel); #expect(!eligibility.retry && !eligibility.materialize && !eligibility.recovery)
+  await store.operate("cancel_operation", op: op)
+  #expect(replies.lock.withLock { replies.preparationCalls } == ["cancel_operation"])
+}
+
+@Test @MainActor func submissionTransportAndDecodeFailuresKeepOriginWarningAcrossSwitches() async throws {
+  for failure in ["disconnect", "decode"] {
+    let first = SubmissionReplies(); first.heldMethod = "execute_plan"; first.executeFailure = failure
+    let second = SubmissionReplies()
+    let serverA = try TestService { request in
+      if request["method"] as? String == "execute_plan", failure == "disconnect" {
+        _ = first.respond(request); return nil // Request accepted, connection lost before response.
+      }
+      return first.respond(request)
+    }
+    let serverB = try TestService { second.respond($0) }
+    let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+    let plan = try await store.planTask(group: "group", label: "A", slug: "a", mode: "materialize")
+    let submission = Task { try await store.executePlan(plan, key: "once") }
+    try await wait(first.arrived)
+    store.socketPath = serverB.path; await store.connect()
+    first.gate.signal()
+    do { try await submission.value; Issue.record("Uncertain submission succeeded") }
+    catch UIError.submissionOutcomeUnknown {}
+    #expect(store.submissionWarnings.count == 1)
+    let warning = try #require(store.submissionWarnings.first)
+    #expect(warning.id.hasPrefix(serverA.path)); #expect(warning.workspacePath == "/tmp/synthetic")
+    #expect(warning.message.contains("같은 요청을 반복하기 전에"))
+    #expect(store.operations.isEmpty); #expect(store.selection?.opId == nil)
+    store.error = nil; await store.refresh(); await store.connect()
+    #expect(store.submissionWarnings == [warning])
+    #expect(first.lock.withLock { first.executeCalls } == 1)
+    #expect(second.lock.withLock { second.executeCalls } == 0)
+    store.dismissSubmissionWarning(warning.id); #expect(store.submissionWarnings.isEmpty)
+  }
+}
+
+@Test @MainActor func explicitSubmissionRejectionDoesNotCreateUnknownOutcomeWarning() async throws {
+  let replies = SubmissionReplies(); replies.executeFailure = "service"
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let plan = try await store.planTask(group: "group", label: "A", slug: "a", mode: "materialize")
+  do { try await store.executePlan(plan, key: "rejected"); Issue.record("Expected rejection") }
+  catch let failure as ServiceFailure { #expect(failure.code == "preparation_queue_full") }
+  #expect(store.submissionWarnings.isEmpty)
+  #expect(replies.lock.withLock { replies.executeCalls } == 1)
+}
+
+@Test @MainActor func reconnectPreservesSheetIdentityButInvalidatesPlan() async throws {
+  let replies = SubmissionReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let sheetIdentity = store.workspaceSession; let planGeneration = store.planSession
+  let plan = try await store.planTask(group: "group", label: "typed name", slug: "typed-slug", mode: "branch_only")
+  await store.connect()
+  #expect(store.workspaceSession == sheetIdentity); #expect(store.planSession != planGeneration)
+  do { try await store.executePlan(plan, key: "old"); Issue.record("Stale plan executed") }
+  catch UIError.planInvalidated {}
+  #expect(replies.lock.withLock { replies.executeCalls } == 0)
+}
+
+@Test @MainActor func manualRefreshReloadsDiffWithIdenticalGitSnapshotAndWaitsForPolling() async throws {
+  let replies = SubmissionReplies(); replies.base.diffFails = false
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.chooseStaged(true)
+  for _ in 0..<100 { if store.diff != nil { break }; try await Task.sleep(for: .milliseconds(5)) }
+  #expect(store.diff?.hunks.count == 1)
+  let before = replies.base.lock.withLock { replies.base.diffCalls }
+  replies.lock.withLock { replies.diffIsBinary = true }
+  await store.refresh()
+  #expect(replies.base.lock.withLock { replies.base.diffCalls } == before)
+  #expect(store.diff?.hunks.count == 1)
+  replies.lock.withLock { replies.heldMethod = "list_operations" }
+  let polling = Task { await store.refresh() }; try await wait(replies.arrived)
+  let manual = Task { await store.refresh(forceDiff: true) }
+  await Task.yield()
+  replies.lock.withLock { replies.heldMethod = "" }; replies.gate.signal()
+  await polling.value; await manual.value
+  #expect(store.repository?.snapshotHash == "code")
+  #expect(store.diff?.hunks.isEmpty == true); #expect(store.diff?.text == "Binary files differ")
+  #expect(replies.base.lock.withLock { replies.base.diffCalls } == before + 1)
 }

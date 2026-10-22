@@ -1,16 +1,20 @@
-# Agent Git Workbench
+# River
+
+<img src="apps/macos/Resources/AppIcon.png" alt="River app icon" width="96" height="96">
 
 **English (canonical)** · [한국어](README.ko.md)
 
 **A native macOS Git app for reviewing work across repositories and worktrees.**
 
-> Early development. The SwiftUI/AppKit app and local Rust engine work today, but there is no stable release or distribution installer yet. The product name and license are still undecided.
+**Many rivers. One ocean.** Our streams of work come together into the software we build.
+
+> Early development. The SwiftUI/AppKit app and local Rust engine work today, but there is no stable release or distribution installer yet. The license is still undecided.
 
 The app UI and detailed guides are currently in Korean. English translations of UI labels below are provided for reference.
 
-![Native workbench showing repository preparation status, changed files, side-by-side diffs, and task details](docs/images/workbench-dark.png)
+![River Clear native workbench with a changed-file list and broad unified diff on light water-colored surfaces](docs/images/workbench-light.png)
 
-*An actual SwiftUI/AppKit view rendered with synthetic Git repositories. App-run checks and AI reports appear as separate records on the right.*
+*An actual SwiftUI/AppKit view rendered with synthetic Git repositories. The Focus layout starts with files and a broad diff; reference panels open when you need them.*
 
 ## What it does
 
@@ -22,17 +26,26 @@ A **workspace** defines a set of repositories and preparation rules. A **Task** 
 | Review and commit | Changed files, split or unified diffs, text-hunk staging and unstaging, and commits of staged changes. |
 | Branches and stash | Search local and remote-tracking branches, inspect recent history as of the last fetch, see linked worktree locations, and browse stash files and diffs read-only. |
 | Review continuity | Restore file, diff, and scroll state within the same workspace, then refresh Git state. Commit drafts last for the app session; personal review and scroll state last for the current workspace session. |
-| Movable panes | Split, move, tab, or hide the files, diff, graph, commit, stash, task details, and branches panes. Layouts persist across launches. |
+| Movable panes | Start with two-column Focus or three-column Balanced, then split, move, tab, or hide any pane. Saved layouts persist across launches; light, dark, and system appearance are independent of layout. |
 | Review alongside AI tools | Copy a request for a selected hunk or a handoff draft, and record task intent, completion criteria, and verification results. |
 
 The app does not call AI models directly. Copy a request into Claude, Codex, Grok, or another tool you use. Results entered by an AI or a person are stored as **reports**, separately from checks the app actually ran.
+
+<details>
+<summary>See the dark appearance</summary>
+
+![River Clear native workbench in its ocean-navy dark appearance](docs/images/workbench-dark.png)
+
+Choose **Clear Shallows / Clear Deep / System** (`맑은 물 / 깊은 물 / 시스템 설정`) in **Layout** (`화면 구성`). Appearance changes keep your pane arrangement.
+
+</details>
 
 <details>
 <summary>See the branches view</summary>
 
 ![Branches pane showing branches, linked working directories, commit IDs, subjects, and authors](docs/images/workbench-branches.png)
 
-Selecting a branch reads its history without checking it out. This synthetic example shows a task whose working directory has not been prepared yet.
+Selecting a branch reads its history without checking it out. This synthetic example shows local and remote-tracking branches alongside the original and task working directories.
 
 </details>
 
@@ -46,14 +59,14 @@ The tested environment is macOS 27.0.1, Swift 6.4, Rust 1.97.1, Git 2.54.0, and 
 git clone https://github.com/ictechgy/agent-git-workbench.git
 cd agent-git-workbench
 python3 scripts/build_macos.py
-open "build/macos/Agent Git Workbench.app"
+open "build/macos/River.app"
 ```
 
 The script builds the Rust engine and Swift app into a development-signed bundle. No Node, npm, or web server is required. The app starts its bundled engine automatically; you do not need to enter a connection address or Unix socket path.
 
 1. Choose **Explore the example** (`예제로 먼저 둘러보기`) on the start screen. This creates two synthetic repositories and a preparation task in the app's own storage.
-2. Select a repository and check **Task working directory / Original project directory** (`이 작업용 폴더 / 원래 프로젝트 폴더`) and the actual path.
-3. Review a change, choose **Stage this change** (`이 변경 스테이징`), and write a message in the commit pane.
+2. Select a repository and check its branch and **Task working directory / Original project directory** (`작업용 폴더 / 원래 프로젝트 폴더`) in the context row. Click the folder control to inspect or copy the full path, open Finder, or switch folders.
+3. Review a change, choose **Stage** (`스테이징`), and write a message in the commit pane.
 4. Open your own project with **Open repository…** (`저장소 열기…`). Opening a directory alone does not modify its files, HEAD, or index, or grant trust to preparation scripts.
 
 Example creation only affects synthetic repositories. **Open repository…** currently registers a single-repository workspace with no preparation recipes. Multi-repository and recipe configurations are demonstrated by the built-in example and the [CLI examples (Korean)](docs/cli.md). Creating, editing, or importing these configurations through the GUI is not implemented yet.
@@ -62,9 +75,11 @@ Running a new task for a project registered with **Open repository…** creates 
 
 ## Keep working
 
-- **Check the location:** Switch between a task's working directory and the original project directory. Pending or failed preparation is not shown as successful.
+- **Check the location:** Repository, branch, folder kind, and folder name stay visible. Open the folder control for the full path and to switch between a task's working directory and the original project directory. Pending or failed preparation is not shown as successful.
 - **Resume a review:** Switching directories within a workspace restores the recent file, diff, and scroll position. Saved intent, completion criteria, and verification records remain in the journal. Commit drafts last for the current app session. Personal review and scroll state clear when you switch workspaces or quit.
-- **Arrange the panes:** Drag a pane title to another pane's left, right, top, or bottom edge to split, or to its center to combine them as tabs. The layout is restored on the next launch. Reopen hidden panes through **Layout** (`화면 구성`) in the toolbar.
+- **Keep the review focused:** A fresh layout starts with files and a broad diff. Named toolbar actions open history, all branches, Stash, commit, and task details. Commit, Stash, and task details share an existing utility tab group when opened, keeping extra panels contained.
+- **Arrange the panes:** Drag a pane title to another pane's left, right, top, or bottom edge to split, or to its center to combine them as tabs. **Layout** (`화면 구성`) offers Focus, Balanced, Classic, Code Review, and Repository Tracks as starting arrangements, plus pane visibility and undo. Existing saved layouts are preserved; select Focus explicitly to adopt the new starting arrangement. Each arrangement remains freely customizable.
+- **Choose the colors:** Clear Shallows is the default light appearance. Clear Deep and System are available in **Layout**, and the choice is saved separately from pane positions.
 - **Separate checks from reports:** **Whitespace and conflict-marker check** (`공백 · 충돌 마커 검사`) runs `git diff --check` on tracked and staged changes and checks Git conflict and in-progress operation state. It does not build or test the project, or inspect untracked file contents or submodule contents.
 
 Shortcuts: `⌘O` open repository · `⌘N` new task · `⌘R` refresh · `⌘↩` commit · `⌘⌥L` layout.
@@ -77,7 +92,7 @@ Settings, recent projects, and the task journal live in `~/Library/Application S
 - **Git execution policy:** The app does not run Git fsmonitor, hooks, or external signing programs. App-created commits do not run hooks and are unsigned, including when `commit.gpgsign=true`. Configured external clean/smudge/process commands cause status/diff reads, preparation, and writes to be rejected. Global LFS filter commands trigger this restriction even when the repository does not use LFS. In the repository, inspect configured commands with `git config --show-origin --get-regexp '^filter\..*\.(clean|smudge|process)$'`.
 - **Preparation and writes:** Working directories are prepared without changing the original checkout. A changed source snapshot or trust basis stops execution; there is no silent replanning or recovery through reset/clean. Recipes are not an OS security sandbox.
 - **Display and resources:** Graph and branch history show at most 80 recent commits. Diff display is capped at 5,000 lines and 512 KiB. Speed, memory, and energy use on large repositories have not been measured.
-- **Development-stage UX:** Notices for some lookup failures and lost responses, and the consistency of preparation-button state, still have known issues. A read already started in the engine may continue after the client cancels it.
+- **Recovery and refresh:** Lost preparation responses leave an origin-project notice for the app session; check that project's task list and Git state before repeating work. These notices do not survive an app restart. Use Refresh after changing Git attributes or diff settings. A read already started in the engine may continue after the client cancels it.
 - **Distribution:** The `.app` uses an ad-hoc development signature. Notarization, an installer, OS-level input testing, and VoiceOver validation are not complete.
 
 See [limitations and known issues (Korean)](docs/limitations.md) for details.
@@ -90,7 +105,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-On 2026-10-22, **62 Rust tests and 51 Swift tests** passed in the tested environment above, both in the developer checkout and in a separate copy containing only the files selected for publication. CLI, native-protocol, and app-startup smoke scenarios using synthetic repositories also passed. There is no CI yet. These results do not establish behavior on real user repositories or performance on large repositories.
+On 2026-10-23, **65 Rust tests and 62 Swift tests** passed in the developer checkout in the environment above. CLI, native-protocol, and app-startup smoke scenarios using synthetic repositories also passed. There is no CI yet. These results do not establish behavior on real user repositories or performance on large repositories.
 
 Detailed guides are currently in Korean:
 
@@ -98,5 +113,6 @@ Detailed guides are currently in Korean:
 - [Architecture and execution boundaries](docs/architecture.md)
 - [CLI, workspace, and recipe examples](docs/cli.md)
 - [Limitations and known issues](docs/limitations.md)
+- [Design principles](DESIGN.md) and [River Clear interface rules](docs/design/river-clear.md)
 
 The license has not been chosen. Cargo metadata currently declares `UNLICENSED`.

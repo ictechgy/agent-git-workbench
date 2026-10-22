@@ -85,7 +85,7 @@ struct DockWorkspace: View {
             drag.frames = frames
             drag.bounds = CGRect(origin: .zero, size: size)
           }
-      }.background(WorkbenchTheme.sidebar)
+      }.background(WorkbenchTheme.chrome)
         .onExitCommand { drag.cancel() }
         .onReceive(
           NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
@@ -109,7 +109,8 @@ private struct DockNodeView: View {
             ScrollView(.horizontal) {
               HStack(spacing: 0) {
                 ForEach(panes) { pane in
-                  DockTab(pane: pane, selected: pane == active, layout: layout, drag: drag).id(pane)
+                  DockTab(pane: pane, title: paneTitle(pane), selected: pane == active,
+                    showsSelection: panes.count > 1, layout: layout, drag: drag).id(pane)
                 }
               }
             }.scrollIndicators(.hidden)
@@ -129,18 +130,10 @@ private struct DockNodeView: View {
             Image(systemName: "ellipsis")
           }.menuStyle(.borderlessButton).fixedSize()
             .accessibilityLabel("\(active.title) 배치 메뉴").padding(.horizontal, 7)
-          Button {
-            layout.hidePane(active)
-          } label: {
-            Image(systemName: "xmark")
-          }
-          .buttonStyle(.plain).padding(.trailing, 10).help("\(active.title) 숨기기")
-          .accessibilityLabel("\(active.title) 숨기기")
-        }.frame(height: 32).background(WorkbenchTheme.sidebar)
+        }.frame(height: 32).background(WorkbenchTheme.panel)
         Divider()
         paneContent(active).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
-      }.background(WorkbenchTheme.canvas)
-        .overlay(Rectangle().stroke(WorkbenchTheme.line, lineWidth: 1))
+      }.riverPaneSurface()
         .background(
           GeometryReader { geometry in
             Color.clear.preference(
@@ -160,6 +153,13 @@ private struct DockNodeView: View {
         AnyView(
           DockNodeView(node: second, store: store, layout: layout, drag: drag, branches: branches))
       }
+    }
+  }
+  private func paneTitle(_ pane: WorkbenchPane) -> String {
+    switch pane {
+    case .stash: "Stash \(store.stashes.count)"
+    case .commit: "커밋 · 스테이징 \(store.stagedCount)"
+    default: pane.title
     }
   }
   @ViewBuilder private func paneContent(_ pane: WorkbenchPane) -> some View {
@@ -186,20 +186,31 @@ private struct DockNodeView: View {
 
 private struct DockTab: View {
   let pane: WorkbenchPane
+  let title: String
   let selected: Bool
+  let showsSelection: Bool
   @ObservedObject var layout: LayoutPreferences
   let drag: DockDragSession
   @GestureState private var dragging = false
   @State private var hovering = false
   var body: some View {
     HStack(spacing: 7) {
-      Image(systemName: "circle.grid.2x3.fill").font(.system(size: 8)).foregroundStyle(.tertiary)
-      Label(pane.title, systemImage: pane.symbol)
+      Image(systemName: "circle.grid.2x3.fill").font(.system(size: 8))
+        .foregroundStyle(WorkbenchTheme.secondaryText).opacity(hovering ? 1 : 0.35)
+      Label {
+        Text(title)
+      } icon: {
+        Image(systemName: pane.symbol)
+          .foregroundStyle(selected ? WorkbenchTheme.accentText : WorkbenchTheme.secondaryText)
+      }
     }
     .font(.system(size: 12, weight: selected ? .semibold : .regular))
-    .foregroundStyle(selected ? Color.primary : .secondary)
+    .foregroundStyle(selected ? WorkbenchTheme.primaryText : WorkbenchTheme.secondaryText)
     .padding(.horizontal, 12).frame(height: 32)
-    .background(selected ? WorkbenchTheme.canvas : .clear)
+    .background(selected && showsSelection ? WorkbenchTheme.canvas : .clear)
+    .overlay(alignment: .top) {
+      if selected && showsSelection { Rectangle().fill(WorkbenchTheme.accent).frame(height: 2).allowsHitTesting(false) }
+    }
     .contentShape(Rectangle())
     .onTapGesture { layout.selectPane(pane) }
     .gesture(
@@ -223,8 +234,8 @@ private struct DockTab: View {
         hovering = false
       }
     }
-    .accessibilityElement().accessibilityLabel("\(pane.title) pane · 드래그하여 이동")
-    .accessibilityAddTraits(.isButton)
+    .accessibilityElement().accessibilityLabel("\(title) 패널 · 드래그하여 이동")
+    .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     .accessibilityAction { layout.selectPane(pane) }
     .help("제목을 끌어 다른 패널의 좌·우·위·아래에 놓기 · 중앙은 탭 합치기")
   }
@@ -234,6 +245,7 @@ private struct DockTab: View {
 private struct DockDragOverlay: View {
   @ObservedObject var drag: DockDragSession
   let size: CGSize
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   var body: some View {
     ZStack(alignment: .topLeading) {
       if let target = drag.target {
@@ -243,7 +255,14 @@ private struct DockDragOverlay: View {
       if let pane = drag.pane {
         Label("\(pane.title) · \(drag.target?.edge.title ?? "이동 취소")", systemImage: "hand.draw")
           .font(.system(size: 12, weight: .semibold)).padding(10)
-          .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+          .background {
+            if reduceTransparency {
+              RoundedRectangle(cornerRadius: 7).fill(WorkbenchTheme.elevated)
+            } else {
+              RoundedRectangle(cornerRadius: 7).fill(.regularMaterial)
+            }
+          }
+          .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(WorkbenchTheme.line))
           .position(x: min(size.width - 90, max(90, drag.location.x)), y: max(18, drag.location.y - 24))
       }
     }.frame(width: size.width, height: size.height)
@@ -285,7 +304,13 @@ private struct DockSplit<First: View, Second: View>: View {
     }
   }
   private func divider(available: Double) -> some View {
-    Rectangle().fill(WorkbenchTheme.line).contentShape(Rectangle())
+    Rectangle().fill(WorkbenchTheme.chrome)
+      .overlay {
+        Rectangle().fill(hovering || resizing ? WorkbenchTheme.accent : WorkbenchTheme.line)
+          .frame(width: axis == .horizontal ? (hovering || resizing ? 2 : 1) : nil,
+                 height: axis == .vertical ? (hovering || resizing ? 2 : 1) : nil)
+          .allowsHitTesting(false)
+      }.contentShape(Rectangle())
       .gesture(
         DragGesture(minimumDistance: 1)
           .updating($resizing) { _, state, _ in state = true }
@@ -328,11 +353,11 @@ private struct DockDropPreview: View {
   let edge: DockEdge
   var body: some View {
     let rect = previewRect
-    RoundedRectangle(cornerRadius: 5).fill(WorkbenchTheme.accent.opacity(0.2))
+    RoundedRectangle(cornerRadius: 5).fill(WorkbenchTheme.accent.opacity(0.14))
       .overlay(RoundedRectangle(cornerRadius: 5).stroke(WorkbenchTheme.accent, lineWidth: 2))
       .overlay(
         Text(edge.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(
-          WorkbenchTheme.accent)
+          WorkbenchTheme.accentText)
       )
       .frame(width: max(1, rect.width - 6), height: max(1, rect.height - 6))
       .position(x: rect.midX, y: rect.midY)

@@ -2,20 +2,6 @@ import AppKit
 import SwiftUI
 import WorkbenchProtocol
 
-enum WorkbenchTheme {
-  static let accent = Color(red: 0.25, green: 0.34, blue: 0.91)
-  static let sidebar = Color(nsColor: .windowBackgroundColor)
-  static let canvas = Color(nsColor: .textBackgroundColor)
-  static let panel = Color(nsColor: .controlBackgroundColor)
-  static let line = Color(nsColor: .separatorColor).opacity(0.5)
-  static func stateColor(_ state: String) -> Color {
-    if state == "ready" { return .green }
-    if ["failed", "needs_recovery"].contains(state) { return .red }
-    if ["partial_failure", "waiting_for_worktree", "cancelled"].contains(state) { return .orange }
-    return accent
-  }
-}
-
 public struct WorkbenchRoot: View {
   @ObservedObject private var store: WorkbenchStore
   @StateObject private var layout: LayoutPreferences
@@ -33,9 +19,22 @@ public struct WorkbenchRoot: View {
     GeometryReader { _ in
       let inspectorVisible = layout.dockLayout.contains(.commit)
       VStack(spacing: 0) {
+        ForEach(store.submissionWarnings) { warning in
+          HStack(alignment: .top) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(WorkbenchTheme.warning)
+            VStack(alignment: .leading, spacing: 4) {
+              Text("\(warning.workspaceTitle) · 실행 여부 확인 필요").font(.system(size: 12, weight: .semibold))
+              Text(warning.message).font(.system(size: 12))
+              Text(warning.workspacePath).font(.system(size: 11)).foregroundStyle(.secondary)
+            }.textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            Button { store.dismissSubmissionWarning(warning.id) } label: { Image(systemName: "xmark") }
+              .buttonStyle(.plain).help("실행 여부 안내 닫기").accessibilityLabel("\(warning.workspaceTitle) 실행 여부 안내 닫기")
+          }.padding(12).background(WorkbenchTheme.warning.opacity(0.1))
+          Divider()
+        }
         if let error = store.error {
           HStack(alignment: .top) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(WorkbenchTheme.warning)
             VStack(alignment: .leading, spacing: 6) {
               Text(error).font(.system(size: 12)).textSelection(.enabled)
               if let details = store.errorDetails, details != error {
@@ -53,7 +52,10 @@ public struct WorkbenchRoot: View {
             } label: {
               Image(systemName: "xmark")
             }.buttonStyle(.plain).help("오류 닫기").accessibilityLabel("오류 닫기")
-          }.padding(12).background(Color.orange.opacity(0.1)).accessibilityElement(
+          }.padding(12).background(WorkbenchTheme.warning.opacity(0.1))
+            .overlay(alignment: .leading) {
+              Rectangle().fill(WorkbenchTheme.warning).frame(width: 3).allowsHitTesting(false)
+            }.accessibilityElement(
             children: .contain)
           Divider()
         }
@@ -72,7 +74,7 @@ public struct WorkbenchRoot: View {
               ReviewLayout(
                 store: store, layout: layout, drag: drag)
             }.padding(.horizontal, 14).padding(.bottom, 14)
-              .background(WorkbenchTheme.sidebar)
+              .background(WorkbenchTheme.chrome)
           } else {
             VStack(spacing: 0) {
               RepositoryTabs(store: store)
@@ -83,9 +85,11 @@ public struct WorkbenchRoot: View {
         }
       }
     }
-    .background(WorkbenchTheme.canvas)
+    .background(WorkbenchTheme.chrome)
+    .foregroundStyle(WorkbenchTheme.primaryText)
     .tint(WorkbenchTheme.accent)
-    .navigationTitle(store.showingWelcome ? "Agent Git Workbench" : store.taskTitle)
+    .preferredColorScheme(layout.appearance == .system ? nil : layout.appearance == .dark ? .dark : .light)
+    .navigationTitle(store.showingWelcome ? "River" : store.taskTitle)
     .onAppear { store.splitDiff = layout.configuration.splitDiff }
     .onChange(of: layout.configuration.splitDiff) { _, value in store.splitDiff = value }
     .onChange(of: store.splitDiff) { _, value in layout.update { $0.splitDiff = value } }
@@ -101,15 +105,15 @@ struct StateBadge: View {
   let state: String
   var body: some View {
     Text(StatusText.label(state)).font(.system(size: 11, weight: .medium))
-      .foregroundStyle(WorkbenchTheme.stateColor(state)).padding(.horizontal, 7).padding(
-        .vertical, 4
+      .foregroundStyle(WorkbenchTheme.stateColor(state)).padding(.horizontal, 6).padding(
+        .vertical, 2
       )
       .background(
-        WorkbenchTheme.stateColor(state).opacity(0.08), in: RoundedRectangle(cornerRadius: 5)
+        WorkbenchTheme.stateColor(state).opacity(0.12), in: RoundedRectangle(cornerRadius: 4)
       )
       .overlay(
-        RoundedRectangle(cornerRadius: 5).stroke(
-          WorkbenchTheme.stateColor(state).opacity(0.25), lineWidth: 0.5))
+        RoundedRectangle(cornerRadius: 4).strokeBorder(
+          WorkbenchTheme.stateColor(state).opacity(0.35), lineWidth: 0.5))
   }
 }
 struct StateDot: View {

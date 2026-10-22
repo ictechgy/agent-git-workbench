@@ -17,7 +17,8 @@ struct TaskContextView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       HStack {
-        Label("작업 목적", systemImage: "scope").font(.system(size: 14, weight: .semibold))
+        Label("작업 목적", systemImage: "scope").font(.system(size: 13, weight: .semibold))
+          .foregroundStyle(WorkbenchTheme.accentText).accessibilityAddTraits(.isHeader)
         Spacer()
         Button(model.isDirty ? "이어서 작성" : "작성 · 수정") { editorIdentity = model.identity; editing = true }
           .disabled(!model.loaded || model.working)
@@ -58,12 +59,13 @@ struct TaskContextView: View {
       }
       if model.isDirty {
         Text("저장하지 않은 작성 내용이 있습니다. 검증·인수인계 전에 저장해 주세요.")
-          .font(.system(size: 11)).foregroundStyle(.orange)
+          .font(.system(size: 11)).foregroundStyle(WorkbenchTheme.warning)
       }
       Divider()
       VStack(alignment: .leading, spacing: 10) {
         HStack {
-          Label("검증 기록", systemImage: "checkmark.shield").font(.system(size: 14, weight: .semibold))
+          Label("검증 기록", systemImage: "checkmark.shield").font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(WorkbenchTheme.accentText).accessibilityAddTraits(.isHeader)
           Spacer()
           if model.working { ProgressView().controlSize(.small) }
         }
@@ -130,7 +132,7 @@ struct TaskContextView: View {
           Spacer(minLength: 0)
           Label(r.verdictLabel, systemImage: r.verdict == "failed" ? "xmark.circle" : r.verdict == "passed" ? "checkmark.circle" : "questionmark.circle")
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(r.verdict == "failed" ? Color.red : r.kind == "git_check" && r.verdict == "passed" ? Color.green : Color.secondary)
+            .foregroundStyle(r.verdict == "failed" ? WorkbenchTheme.danger : r.kind == "git_check" && r.verdict == "passed" ? WorkbenchTheme.success : WorkbenchTheme.secondaryText)
         }
         Text(r.freshness(repoId: store.selection?.repoId, opId: store.selection?.opId,
           snapshot: store.validatingSelection ? nil : store.repository?.snapshotHash, requirements: requirements))
@@ -138,7 +140,10 @@ struct TaskContextView: View {
         (Text(Date(timeIntervalSince1970: r.finishedAt), style: .relative) + Text(" 전"))
           .font(.system(size: 11)).foregroundStyle(.secondary)
       }
-    }.padding(10).background(WorkbenchTheme.canvas, in: RoundedRectangle(cornerRadius: 7))
+    }.padding(.vertical, 10)
+      .overlay(alignment: .bottom) {
+        Rectangle().fill(WorkbenchTheme.line).frame(height: 1).allowsHitTesting(false)
+      }
   }
 }
 
@@ -161,7 +166,7 @@ private struct ContextEditor: View {
       HStack {
         if model.draft?.revision != model.bundle?.context.revision {
           Button("현재 저장본 불러오기") { if identity == model.identity { model.reloadDraft() } }
-          Text("다른 저장본이 있습니다. 입력을 먼저 복사해 두세요.").font(.caption).foregroundStyle(.orange)
+          Text("다른 저장본이 있습니다. 입력을 먼저 복사해 두세요.").font(.caption).foregroundStyle(WorkbenchTheme.warning)
         }
         Spacer()
         Button("닫기") { dismiss() }.keyboardShortcut(.cancelAction)

@@ -1,72 +1,83 @@
 import SwiftUI
+import WorkbenchProtocol
 
 struct RepositoryTabs: View {
   @ObservedObject var store: WorkbenchStore
+  @State private var hoveredRepository: String?
   private var ids: [String] {
     store.contextOperation?.repos.map(\.id) ?? store.workspace?.repositories.map(\.id) ?? []
   }
   var body: some View {
-    VStack(spacing: 0) {
-      ScrollView(.horizontal) {
-        HStack(spacing: 4) {
-          ForEach(ids, id: \.self) { id in
-            let selected = store.selection?.repoId == id
-            let op = store.contextOperation
-            let repo = op?.repos.first { $0.id == id }
-            HStack(spacing: 9) {
-              Button {
-                store.select(.init(repoId: id, opId: op?.id))
-              } label: {
-                HStack(spacing: 9) {
-                  Image(systemName: "externaldrive").foregroundStyle(.secondary)
-                  Text(id).font(.system(size: 13, weight: selected ? .semibold : .regular))
-                  if let repo { StateBadge(state: repo.state) }
-                }.padding(.vertical, 8).padding(.leading, 12).padding(.trailing, 9)
-                  .contentShape(Rectangle())
-              }.buttonStyle(.plain).disabled(store.busy).help("\(id) 저장소 보기")
-              if let op, op.canRetry,
-                repo?.state != "ready" || op.repos.allSatisfy({ $0.state == "ready" }) {
-                if op.requiresNewPlan {
-                  Button("새 작업 만들기") { store.beginRecovery(op) }.disabled(store.busy).padding(.trailing, 10)
-                } else {
-                  Button("재시도") { Task { await store.operate("retry_operation", op: op) } }
-                    .disabled(store.busy || store.hasRunningOperation).padding(.trailing, 10)
-                }
-              }
-            }.background(selected ? WorkbenchTheme.canvas : .clear)
-              .overlay(alignment: .bottom) {
-                if selected { Rectangle().fill(WorkbenchTheme.accent).frame(height: 2) }
-              }
+    HStack(spacing: 12) {
+      ScrollViewReader { proxy in
+        ScrollView(.horizontal) {
+          HStack(spacing: 4) {
+            ForEach(ids, id: \.self) { id in
+              repositoryTab(id).id(id)
+            }
           }
-        }.padding(.horizontal, 14)
-      }.frame(height: 46)
-      HStack(spacing: 14) {
-        Text(store.selection?.repoId ?? "저장소").font(.system(size: 13, weight: .semibold))
-        if let op = store.contextOperation, let repoID = store.selection?.repoId {
-          Picker(
-            "현재 위치",
-            selection: Binding(
-              get: { store.selection?.opId != nil },
-              set: { store.select(.init(repoId: repoID, opId: $0 ? op.id : nil)) }
-            )
-          ) {
-            Text("이 작업용 폴더").tag(true)
-            Text("원래 프로젝트 폴더").tag(false)
-          }.pickerStyle(.segmented).labelsHidden().frame(width: 286).disabled(store.busy)
-          Spacer()
-          if op.canMaterialize && !op.requiresNewPlan {
-            Button("워크트리 준비") { Task { await store.operate("materialize", op: op) } }
-              .disabled(store.busy || store.hasRunningOperation)
-          } else if op.isRunning {
-            Button("준비 취소") { Task { await store.operate("cancel_operation", op: op) } }
-              .disabled(store.busy)
+        }.scrollIndicators(.hidden)
+          .onChange(of: store.selection?.repoId) { _, id in
+            if let id { proxy.scrollTo(id) }
           }
-        } else {
-          Spacer()
+      }.frame(minWidth: 150, maxWidth: .infinity)
+      RepositoryBranchContext(store: store).frame(maxWidth: 210)
+      CurrentFolderContext(store: store).frame(maxWidth: 350)
+      if let op = store.contextOperation {
+        if op.canMaterialize && !op.requiresNewPlan {
+          Button("워크트리 준비") { Task { await store.operate("materialize", op: op) } }
+            .disabled(!store.preparationEligibility(for: op.id).materialize)
+        } else if op.isRunning {
+          Button("준비 취소") { Task { await store.operate("cancel_operation", op: op) } }
+            .disabled(!store.preparationEligibility(for: op.id).cancel)
         }
-      }.padding(.horizontal, 18).frame(height: 44)
-      CurrentFolderContext(store: store)
-      Divider()
-    }.background(WorkbenchTheme.sidebar)
+      }
+    }.font(.system(size: 12)).controlSize(.regular)
+      .padding(.horizontal, 16).frame(height: 48)
+      .background(WorkbenchTheme.panel)
+      .overlay(alignment: .bottom) {
+        Rectangle().fill(WorkbenchTheme.line).frame(height: 1).allowsHitTesting(false)
+      }
+  }
+
+  private func repositoryTab(_ id: String) -> some View {
+    let selected = store.selection?.repoId == id
+    let op = store.contextOperation
+    let repo = op?.repos.first { $0.id == id }
+    return HStack(spacing: 6) {
+      Button {
+        store.select(.init(repoId: id, opId: op?.id))
+      } label: {
+        HStack(spacing: 7) {
+          Image(systemName: "externaldrive")
+            .foregroundStyle(selected ? WorkbenchTheme.accentText : WorkbenchTheme.secondaryText)
+          Text(id).font(.system(size: 13, weight: selected ? .semibold : .regular))
+            .lineLimit(1).truncationMode(.middle).frame(maxWidth: 230)
+          if let repo, repo.state != "ready" { StateBadge(state: repo.state) }
+        }.padding(.vertical, 8).padding(.horizontal, 10).contentShape(Rectangle())
+      }.buttonStyle(.plain).disabled(store.busy).help("\(id) 저장소 보기")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(repo.map { StatusText.label($0.state) } ?? "")
+      if let op, op.canRetry,
+        repo?.state != "ready" || op.repos.allSatisfy({ $0.state == "ready" }) {
+        let eligibility = store.preparationEligibility(for: op.id)
+        if op.requiresNewPlan {
+          Button("새 작업 만들기") { store.beginRecovery(op) }
+            .disabled(!eligibility.recovery).padding(.trailing, 8)
+            .help("원래 폴더의 현재 상태를 기준으로 새 계획 만들기 · 기존 변경 유지")
+        } else {
+          Button("다시 시도") { Task { await store.operate("retry_operation", op: op) } }
+            .disabled(!eligibility.retry).padding(.trailing, 8)
+            .help("작업 전체의 실패 단계부터 재개 · 완료된 저장소는 유지")
+            .accessibilityLabel("\(id) 준비 다시 시도 · 작업 전체 재개, 완료된 저장소는 유지")
+        }
+      }
+    }.background(
+      selected ? WorkbenchTheme.canvas : hoveredRepository == id ? WorkbenchTheme.chrome : .clear,
+      in: RoundedRectangle(cornerRadius: 6))
+      .onHover { inside in hoveredRepository = inside ? id : nil }
+      .overlay(alignment: .bottom) {
+        if selected { Rectangle().fill(WorkbenchTheme.accent).frame(height: 2).padding(.horizontal, 8) }
+      }
   }
 }

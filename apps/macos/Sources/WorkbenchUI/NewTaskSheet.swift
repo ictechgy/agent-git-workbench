@@ -12,6 +12,7 @@ struct NewTaskSheet: View {
   @State private var key = UUID().uuidString
   @State private var busy = false
   @State private var error: String?
+  @State private var submissionOutcomeUnknown = false
   @FocusState private var nameFocused: Bool
 
   var body: some View {
@@ -25,7 +26,7 @@ struct NewTaskSheet: View {
         Text("이전 작업의 폴더와 브랜치는 유지됩니다. 다른 브랜치 이름으로 현재 상태에서 새 작업을 준비합니다.")
           .font(.system(size: 12)).foregroundStyle(.secondary)
       }
-      if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+      if let error { Text(error).font(.caption).foregroundStyle(WorkbenchTheme.danger).textSelection(.enabled) }
       if let workspacePlan = plan {
         let plan = workspacePlan.details
         ScrollView {
@@ -92,7 +93,7 @@ struct NewTaskSheet: View {
         Button(plan == nil ? "계획 미리보기" : "이 계획 실행") { Task { await submit() } }
           .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
           .disabled(
-            busy
+            busy || submissionOutcomeUnknown
               || (plan == nil
                 && (label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                   || slug.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -109,6 +110,10 @@ struct NewTaskSheet: View {
         nameFocused = true
       }
       .interactiveDismissDisabled(busy)
+      .onChange(of: store.planSession) { _, _ in
+        plan = nil
+        error = UserFacingFailure.message(UIError.planInvalidated)
+      }
       .onDisappear { store.recoveryTaskID = nil }
   }
   private func submit() async {
@@ -126,6 +131,13 @@ struct NewTaskSheet: View {
     } catch UIError.workspaceChanged {
       plan = nil
       self.error = UserFacingFailure.message(UIError.workspaceChanged)
+    } catch UIError.planInvalidated {
+      plan = nil
+      self.error = UserFacingFailure.message(UIError.planInvalidated)
+    } catch UIError.submissionOutcomeUnknown {
+      plan = nil
+      submissionOutcomeUnknown = true
+      self.error = UserFacingFailure.message(UIError.submissionOutcomeUnknown)
     } catch let failure as ServiceFailure where failure.code == "branch_collision" {
       slug = store.nextTaskSlug(slug)
       self.error = "같은 브랜치가 있어 새 이름을 제안했습니다. 이름을 확인한 뒤 계획을 다시 확인해 주세요."

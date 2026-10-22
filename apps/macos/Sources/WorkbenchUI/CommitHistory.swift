@@ -38,17 +38,18 @@ struct CommitHistory: View {
       Divider()
       if expanded {
         if store.historyTab == "history" {
-          HStack {
-            Text("그래프").frame(width: 72, alignment: .leading)
-            Text("설명").frame(maxWidth: .infinity, alignment: .leading)
-            Text("작성자").frame(width: 85, alignment: .leading)
-            Text("커밋").frame(width: 70, alignment: .leading)
-          }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 20).frame(
-            height: 28)
-          Divider()
           GeometryReader { geometry in
             ScrollView([.vertical, .horizontal]) {
               VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                  Text("그래프").padding(.leading, 20).frame(width: 92, alignment: .leading)
+                  HStack(spacing: 10) {
+                    Text("설명").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("작성자").frame(width: 85, alignment: .leading)
+                    Text("커밋").frame(width: 70, alignment: .leading)
+                  }.padding(.trailing, 20)
+                }.font(.system(size: 10)).foregroundStyle(WorkbenchTheme.secondaryText).frame(height: 28)
+                Divider()
                 let commits = store.repository?.graph ?? []
                 if commits.isEmpty {
                   Text(store.pendingWorktree ? "워크트리를 준비하면 커밋 기록이 표시됩니다." : "아직 커밋 기록이 없습니다.")
@@ -127,6 +128,7 @@ struct CommitHistory: View {
 
 struct GraphCanvas: View {
   let commits: [HistoryCommit]
+  var rowHeight: CGFloat = 36
   var body: some View {
     Canvas { context, _ in
       var lanes: [String?] = []
@@ -138,7 +140,7 @@ struct GraphCanvas: View {
           if lane == lanes.count { lanes.append(commit.oid) } else { lanes[lane!] = commit.oid }
         }
         let slot = lane!
-        points[commit.oid] = CGPoint(x: 28 + slot * 18, y: row * 36 + 18)
+        points[commit.oid] = CGPoint(x: CGFloat(28 + slot * 18), y: CGFloat(row) * rowHeight + rowHeight / 2)
         lanes[slot] = nil
         for (index, parent) in commit.parents.enumerated() where !lanes.contains(parent) {
           let next = index == 0 ? slot : lanes.firstIndex(of: nil) ?? lanes.count
@@ -155,7 +157,7 @@ struct GraphCanvas: View {
             to: end, control1: .init(x: point.x, y: (point.y + end.y) / 2),
             control2: .init(x: end.x, y: (point.y + end.y) / 2))
           context.stroke(
-            path, with: .color(point.x == 28 ? WorkbenchTheme.accent : .purple), lineWidth: 1.7)
+            path, with: .color(point.x == 28 ? WorkbenchTheme.accent : WorkbenchTheme.secondaryText), lineWidth: 1.7)
         }
       }
       for point in points.values {

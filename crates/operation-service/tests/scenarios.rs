@@ -34,6 +34,296 @@ fn context_save(repo: &str, revision: u64) -> Value {
 }
 
 #[test]
+fn malformed_optional_scope_never_falls_back_to_the_original_repository() {
+    let f = Fixture::new();
+    let op = f.execute(Mode::Materialize, "typed-rpc-scope");
+    assert_eq!(op.status, "ready");
+    let source = &f.workspace.repo("ios-app").unwrap().path;
+    let task = &op
+        .repos
+        .iter()
+        .find(|r| r.plan.repo_id == "ios-app")
+        .unwrap()
+        .plan
+        .worktree_path;
+    fs::write(source.join("notes.txt"), "unstaged original change\n").unwrap();
+    fs::write(source.join("staged.txt"), "original commit candidate\n").unwrap();
+    git::git(source, &["add", "--", "staged.txt"]).unwrap();
+    let diff = git::diff(source, "notes.txt", false).unwrap();
+    let before = [source, task].map(|path| {
+        let snapshot = git::snapshot(path).unwrap();
+        let git_dir = git::git(path, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        let index = std::path::PathBuf::from(git_dir.trim()).join("index");
+        (snapshot, index.clone(), fs::read(index).unwrap())
+    });
+    let original_context = f.rpc("get_task_context", json!({"repo_id":"ios-app"}));
+    let task_context = f.rpc(
+        "get_task_context",
+        json!({"repo_id":"ios-app","op_id":op.id}),
+    );
+    let report = json!({"repo_id":"ios-app","kind":"human_report","verdict":"passed","command":"manual check","note":"must not be saved"});
+    for malformed in [
+        json!(false),
+        json!(123),
+        json!([]),
+        json!({"expected_task":op.id}),
+        json!(""),
+        json!(" \t"),
+    ] {
+        for (method, mut params) in [
+            ("list_branches", json!({"repo_id":"ios-app"})),
+            (
+                "get_branch_history",
+                json!({"repo_id":"ios-app","branch_ref":"refs/heads/main","tip_oid":before[0].0.head}),
+            ),
+            ("list_stashes", json!({"repo_id":"ios-app"})),
+            (
+                "get_stash",
+                json!({"repo_id":"ios-app","stash_oid":before[0].0.head}),
+            ),
+            (
+                "get_stash_diff",
+                json!({"repo_id":"ios-app","stash_oid":before[0].0.head,"path":"notes.txt"}),
+            ),
+            ("get_repo_status", json!({"repo_id":"ios-app"})),
+            ("get_diff", json!({"repo_id":"ios-app","path":"notes.txt"})),
+            (
+                "stage_hunk",
+                json!({"repo_id":"ios-app","path":"notes.txt","hunk_index":0,"snapshot_hash":diff.snapshot_hash,"diff_hash":hash(diff.text.as_bytes())}),
+            ),
+            (
+                "commit",
+                json!({"repo_id":"ios-app","snapshot_hash":diff.snapshot_hash,"message":"must not commit the original"}),
+            ),
+            ("get_task_context", json!({"repo_id":"ios-app"})),
+            (
+                "run_git_check",
+                json!({"repo_id":"ios-app","snapshot_hash":diff.snapshot_hash}),
+            ),
+            ("record_verification_report", report.clone()),
+        ] {
+            params["op_id"] = malformed.clone();
+            let response = f.service.dispatch(Request {
+                method: method.into(),
+                params,
+            });
+            assert_eq!(
+                response.error.unwrap().code,
+                "invalid_parameter",
+                "{method}: {malformed}"
+            );
+            assert!(response.result.is_none());
+        }
+        for (method, mut params) in [
+            (
+                "get_task_context",
+                json!({"repo_id":"ios-app","op_id":op.id}),
+            ),
+            ("save_task_context", context_save("ios-app", 0)),
+            (
+                "run_git_check",
+                json!({"repo_id":"ios-app","snapshot_hash":diff.snapshot_hash}),
+            ),
+            ("record_verification_report", report.clone()),
+        ] {
+            params["context_op_id"] = malformed.clone();
+            let response = f.service.dispatch(Request {
+                method: method.into(),
+                params,
+            });
+            assert_eq!(
+                response.error.unwrap().code,
+                "invalid_parameter",
+                "{method}: {malformed}"
+            );
+            assert!(response.result.is_none());
+        }
+    }
+    for (method, typo, mut params) in [
+        (
+            "stage_hunk",
+            "opid",
+            json!({"repo_id":"ios-app","path":"notes.txt","hunk_index":0,"snapshot_hash":diff.snapshot_hash,"diff_hash":hash(diff.text.as_bytes())}),
+        ),
+        (
+            "commit",
+            "opid",
+            json!({"repo_id":"ios-app","snapshot_hash":diff.snapshot_hash,"message":"must not commit the original"}),
+        ),
+        (
+            "save_task_context",
+            "context_opid",
+            context_save("ios-app", 0),
+        ),
+        (
+            "run_git_check",
+            "opid",
+            json!({"repo_id":"ios-app","snapshot_hash":diff.snapshot_hash}),
+        ),
+        ("record_verification_report", "opid", report),
+    ] {
+        params[typo] = json!(op.id);
+        let response = f.service.dispatch(Request {
+            method: method.into(),
+            params,
+        });
+        assert!(
+            response.error.is_some(),
+            "{method} accepted misspelled scope {typo}"
+        );
+        assert!(response.result.is_none());
+    }
+    for (path, (snapshot, index, bytes)) in [source, task].into_iter().zip(before) {
+        assert_eq!(
+            snapshot,
+            git::snapshot(path).unwrap(),
+            "HEAD/index/files changed at {path:?}"
+        );
+        assert_eq!(
+            bytes,
+            fs::read(index).unwrap(),
+            "raw index changed at {path:?}"
+        );
+    }
+    assert_eq!(
+        original_context,
+        f.rpc("get_task_context", json!({"repo_id":"ios-app"}))
+    );
+    assert_eq!(
+        task_context,
+        f.rpc(
+            "get_task_context",
+            json!({"repo_id":"ios-app","op_id":op.id})
+        )
+    );
+    let db = rusqlite::Connection::open(f.home.join("journal.sqlite")).unwrap();
+    for table in ["task_contexts", "verification_receipts"] {
+        let count: i64 = db
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "malformed scope created a row in {table}");
+    }
+
+    // Validation takes precedence even when resolving the repository would fail.
+    fs::rename(source, source.with_extension("moved")).unwrap();
+    for method in [
+        "list_branches",
+        "get_repo_status",
+        "get_diff",
+        "stage_hunk",
+        "commit",
+        "run_git_check",
+        "record_verification_report",
+    ] {
+        let response = f.service.dispatch(Request {
+            method: method.into(),
+            params: json!({"repo_id":"ios-app","op_id":123}),
+        });
+        assert_eq!(
+            response.error.unwrap().code,
+            "invalid_parameter",
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn malformed_staged_values_are_rejected_without_changing_git() {
+    let f = Fixture::new();
+    let path = &f.workspace.repo("ios-app").unwrap().path;
+    fs::write(path.join("notes.txt"), "unstaged change\n").unwrap();
+    let diff = git::diff(path, "notes.txt", false).unwrap();
+    let before = git::snapshot(path).unwrap();
+    let index = fs::read(path.join(".git/index")).unwrap();
+    for malformed in [Value::Null, json!(0), json!("false"), json!([]), json!({})] {
+        for method in ["get_diff", "stage_hunk"] {
+            let response = f.service.dispatch(Request { method: method.into(), params: json!({"repo_id":"ios-app","path":"notes.txt","staged":malformed,"hunk_index":0,"snapshot_hash":diff.snapshot_hash,"diff_hash":hash(diff.text.as_bytes())}) });
+            assert_eq!(
+                response.error.unwrap().code,
+                "invalid_parameter",
+                "{method}: {malformed}"
+            );
+        }
+    }
+    assert_eq!(before, git::snapshot(path).unwrap());
+    assert_eq!(index, fs::read(path.join(".git/index")).unwrap());
+    fs::rename(path, path.with_extension("moved")).unwrap();
+    for method in ["get_diff", "stage_hunk"] {
+        let response = f.service.dispatch(Request {
+            method: method.into(),
+            params: json!({"repo_id":"ios-app","staged":"false"}),
+        });
+        assert_eq!(response.error.unwrap().code, "invalid_parameter");
+    }
+}
+
+#[test]
+fn omitted_null_and_valid_optional_scope_preserve_original_and_task_actions() {
+    let f = Fixture::new();
+    let op = f.execute(Mode::Materialize, "valid-rpc-scope");
+    assert_eq!(op.status, "ready");
+    let source = &f.workspace.repo("ios-app").unwrap().path;
+    let task = &op
+        .repos
+        .iter()
+        .find(|r| r.plan.repo_id == "ios-app")
+        .unwrap()
+        .plan
+        .worktree_path;
+    let original = f.rpc("get_repo_status", json!({"repo_id":"ios-app"}));
+    assert_eq!(
+        original,
+        f.rpc("get_repo_status", json!({"repo_id":"ios-app","op_id":null}))
+    );
+    let task_view = f.rpc(
+        "get_repo_status",
+        json!({"repo_id":"ios-app","op_id":op.id}),
+    );
+    assert_eq!(
+        task_view["snapshot_hash"],
+        digest(&git::snapshot(task).unwrap()).unwrap()
+    );
+    for op_id in [Value::Null, json!(op.id)] {
+        f.rpc("list_branches", json!({"repo_id":"ios-app","op_id":op_id}));
+        let mut save = context_save("ios-app", 0);
+        save["context_op_id"] = op_id.clone();
+        f.rpc("save_task_context", save);
+        let loaded = f.rpc(
+            "get_task_context",
+            json!({"repo_id":"ios-app","op_id":op_id,"context_op_id":null}),
+        );
+        assert_eq!(loaded["context"]["revision"], 1);
+    }
+    for (path, op_id) in [(source, Value::Null), (task, json!(op.id))] {
+        let other = if path == source { task } else { source };
+        let other_before = git::snapshot(other).unwrap();
+        fs::write(path.join("notes.txt"), "scoped change\n").unwrap();
+        let diff = f.rpc(
+            "get_diff",
+            json!({"repo_id":"ios-app","op_id":op_id,"path":"notes.txt"}),
+        );
+        assert_eq!(
+            diff,
+            f.rpc(
+                "get_diff",
+                json!({"repo_id":"ios-app","op_id":op_id,"path":"notes.txt","staged":false})
+            )
+        );
+        let staged = f.rpc("stage_hunk", json!({"repo_id":"ios-app","op_id":op_id,"path":"notes.txt","hunk_index":0,"snapshot_hash":diff["snapshot_hash"],"diff_hash":hash(diff["text"].as_str().unwrap().as_bytes())}));
+        let committed = f.rpc("commit", json!({"repo_id":"ios-app","op_id":op_id,"snapshot_hash":staged["view"]["snapshot_hash"],"message":"Commit to the explicit scope"}));
+        assert_eq!(committed["status"], "committed");
+        assert_eq!(other_before, git::snapshot(other).unwrap());
+        let checked = f.rpc("run_git_check", json!({"repo_id":"ios-app","op_id":op_id,"context_op_id":null,"snapshot_hash":committed["view"]["snapshot_hash"]}));
+        assert_eq!(checked["verifications"][0]["op_id"], op_id);
+        let reported = f.rpc("record_verification_report", json!({"repo_id":"ios-app","op_id":op_id,"context_op_id":null,"kind":"human_report","verdict":"passed","command":"manual check","note":"explicit scope"}));
+        assert_eq!(reported["verifications"][0]["op_id"], op_id);
+        assert_eq!(reported["verifications"][0]["path"], path.to_str().unwrap());
+    }
+}
+
+#[test]
 fn operation_key_lookup_finds_the_original_without_list_order_or_pagination() {
     let f = Fixture::new();
     let plan = f
@@ -1080,13 +1370,21 @@ fn repository_git_programs_do_not_run_without_a_trust_contract() {
     )
     .unwrap();
     fs::write(path.join("notes.txt"), "filter-sensitive dirty content\n").unwrap();
-    for method in ["get_repo_status", "get_diff", "stage_hunk", "commit"] {
+    for (method, params) in [
+        ("get_repo_status", json!({"repo_id":"ios-app"})),
+        ("get_diff", json!({"repo_id":"ios-app","path":"notes.txt"})),
+        (
+            "stage_hunk",
+            json!({"repo_id":"ios-app","path":"notes.txt","snapshot_hash":safe_hash,"diff_hash":hash(diff["text"].as_str().unwrap().as_bytes()),"hunk_index":0}),
+        ),
+        (
+            "commit",
+            json!({"repo_id":"ios-app","message":"blocked","snapshot_hash":safe_hash}),
+        ),
+    ] {
         let response = f.service.dispatch(Request {
             method: method.into(),
-            params: json!({
-                "repo_id":"ios-app", "path":"notes.txt", "message":"blocked",
-                "snapshot_hash":safe_hash, "diff_hash":hash(diff["text"].as_str().unwrap().as_bytes()), "hunk_index":0
-            }),
+            params,
         });
         assert_eq!(response.error.unwrap().code, "unsupported_external_filter");
     }

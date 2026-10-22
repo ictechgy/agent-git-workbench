@@ -2,17 +2,28 @@ import SwiftUI
 
 struct WelcomeView: View {
   @ObservedObject var store: WorkbenchStore
+
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+  @Environment(\.colorSchemeContrast) private var contrast
+
   var body: some View {
     GeometryReader { geometry in
       ScrollView {
         VStack(alignment: .leading, spacing: 42) {
           HStack(spacing: 12) {
-            Image(systemName: "arrow.triangle.branch").font(.system(size: 22, weight: .semibold))
-              .foregroundStyle(.white).frame(width: 48, height: 48)
-              .background(WorkbenchTheme.accent.gradient, in: RoundedRectangle(cornerRadius: 13))
+            RiverAppIcon(size: 48)
             VStack(alignment: .leading, spacing: 3) {
-              Text("Agent Git Workbench").font(.system(size: 17, weight: .semibold))
-              Text("프로젝트마다, 나만의 작업대.").font(.system(size: 12)).foregroundStyle(.secondary)
+              Text("River").font(.system(size: 17, weight: .semibold))
+              HStack(spacing: 5) {
+                HStack(spacing: 3) {
+                  ForEach([WorkbenchTheme.brandAmber, WorkbenchTheme.accent, WorkbenchTheme.brandLilac].indices, id: \.self) { i in
+                    Circle().fill([WorkbenchTheme.brandAmber, WorkbenchTheme.accent, WorkbenchTheme.brandLilac][i])
+                      .frame(width: 4, height: 4)
+                  }
+                }.accessibilityHidden(true)
+                Text("우리의 강줄기가 모여, 하나의 바다로.").font(.system(size: 12))
+                  .foregroundStyle(WorkbenchTheme.secondaryText)
+              }
             }
             Spacer()
             if store.workspace != nil {
@@ -38,16 +49,15 @@ struct WelcomeView: View {
                   Text("저장소 열기…").font(.system(size: 15, weight: .semibold))
                   Spacer()
                   Text("⌘O").font(.system(size: 12)).opacity(0.7)
-                }.padding(.horizontal, 18).frame(height: 58).contentShape(Rectangle())
-              }.buttonStyle(.plain).foregroundStyle(.white)
-                .background(WorkbenchTheme.accent, in: RoundedRectangle(cornerRadius: 10))
+                }.padding(.horizontal, 4).frame(height: 52).contentShape(Rectangle())
+              }.buttonStyle(PrimaryActionStyle())
                 .disabled(store.busy).help("Git 프로젝트 폴더 선택")
               Button {
                 Task { await store.openExample() }
               } label: {
                 HStack(spacing: 13) {
                   Image(systemName: "square.stack.3d.up").font(.system(size: 23, weight: .light))
-                    .foregroundStyle(WorkbenchTheme.accent).frame(width: 28)
+                    .foregroundStyle(WorkbenchTheme.accentText).frame(width: 28)
                   VStack(alignment: .leading, spacing: 5) {
                     Text("예제로 먼저 둘러보기").font(.system(size: 13, weight: .medium))
                     Text("두 저장소의 작업과 코드 변경을 살펴보세요.")
@@ -58,9 +68,9 @@ struct WelcomeView: View {
                 }.padding(17).frame(maxWidth: .infinity, alignment: .leading).contentShape(
                   Rectangle())
               }.buttonStyle(.plain)
-                .background(WorkbenchTheme.canvas, in: RoundedRectangle(cornerRadius: 10))
+                .background(WorkbenchTheme.elevated, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(
-                  RoundedRectangle(cornerRadius: 10).stroke(WorkbenchTheme.line, lineWidth: 1)
+                  RoundedRectangle(cornerRadius: 8).strokeBorder(WorkbenchTheme.line, lineWidth: 1).allowsHitTesting(false)
                 )
                 .disabled(store.busy)
               HStack(spacing: 8) {
@@ -101,7 +111,7 @@ struct WelcomeView: View {
                       HStack(spacing: 12) {
                         Image(systemName: recent.isExample ? "square.stack.3d.up" : "folder")
                           .font(.system(size: 19, weight: .light)).foregroundStyle(
-                            WorkbenchTheme.accent)
+                            WorkbenchTheme.accentText)
                         VStack(alignment: .leading, spacing: 5) {
                           Text(recent.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
                           Text(recent.isExample ? "앱에서 만든 예제" : recent.repositoryPath)
@@ -127,7 +137,13 @@ struct WelcomeView: View {
           }.font(.system(size: 11)).foregroundStyle(.secondary)
         }.padding(48).frame(maxWidth: 1040)
           .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .center)
-      }.background(WorkbenchTheme.sidebar)
+      }.background {
+        WorkbenchTheme.chrome
+        if !reduceTransparency && contrast == .standard {
+          RadialGradient(colors: [WorkbenchTheme.accent.opacity(0.08), .clear],
+            center: .topTrailing, startRadius: 0, endRadius: 520).allowsHitTesting(false)
+        }
+      }
     }
   }
 }

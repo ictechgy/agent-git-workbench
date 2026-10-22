@@ -7,7 +7,7 @@ struct AgentGitWorkbenchApp: App {
   @NSApplicationDelegateAdaptor(WorkbenchAppDelegate.self) private var appDelegate
   @StateObject private var store = WorkbenchStore()
   var body: some Scene {
-    Window("Agent Git Workbench", id: "workbench") {
+    Window("River", id: "workbench") {
       WorkbenchRoot(store: store).frame(minWidth: 1100, minHeight: 720)
         .task {
           appDelegate.store = store

@@ -17,12 +17,15 @@ struct NativePreview {
     let app = NSApplication.shared
     app.setActivationPolicy(.prohibited)
     let dark = CommandLine.arguments.count >= 4 && CommandLine.arguments[3] == "dark"
+    let highContrast = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_HIGH_CONTRAST"] == "1"
     let width = CommandLine.arguments.count == 6 ? Double(CommandLine.arguments[4]) ?? 1440 : 1440
     let height = CommandLine.arguments.count == 6 ? Double(CommandLine.arguments[5]) ?? 960 : 960
     guard (1100...3000).contains(width), (720...2000).contains(height) else {
       throw CocoaError(.validationMissingMandatoryProperty)
     }
-    app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    app.appearance = NSAppearance(named: highContrast
+      ? (dark ? .accessibilityHighContrastDarkAqua : .accessibilityHighContrastAqua)
+      : (dark ? .darkAqua : .aqua))
     let mode = CommandLine.arguments[1]
     let previewStorage = FileManager.default.temporaryDirectory.appendingPathComponent(
       "agw-preview-\(UUID().uuidString)")
@@ -32,6 +35,8 @@ struct NativePreview {
     let defaults = UserDefaults(suiteName: preferenceSuite)!
     defer { defaults.removePersistentDomain(forName: preferenceSuite) }
     let layout = LayoutPreferences(defaults: defaults)
+    // The harness controls AppKit appearance, including Increase Contrast.
+    layout.appearance = .system
     let dockSession = DockDragSession()
     if let name = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_LAYOUT"],
       let preset = LayoutPreset(rawValue: name)
@@ -204,6 +209,8 @@ struct NativePreview {
     if dockScene != "default" {
       layout.hidePane(.details)
       if dockScene == "free" {
+        layout.showPane(.commit)
+        try await Task.sleep(for: .milliseconds(100))
         try await dock(.stash, beside: .diff, edge: .left, layout: layout, drag: dockSession)
         try await dock(.graph, beside: .commit, edge: .bottom, layout: layout, drag: dockSession)
         try await dock(.files, beside: .diff, edge: .bottom, layout: layout, drag: dockSession)
@@ -524,6 +531,9 @@ struct NativePreview {
     let diff = store.diff?.text
     let staged = store.staged
     let message = store.commitMessage
+    // Focus starts with two panes; materialize a target for the same drag scenario.
+    layout.showPane(.commit)
+    try await Task.sleep(for: .milliseconds(100))
     layout.hidePane(.details)
     try await dock(.stash, beside: .diff, edge: .left, layout: layout, drag: drag)
     guard let stash = drag.frames[.stash], let review = drag.frames[.diff],

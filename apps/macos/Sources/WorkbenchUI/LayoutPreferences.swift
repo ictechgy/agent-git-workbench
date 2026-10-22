@@ -1,6 +1,17 @@
 import Combine
 import Foundation
 
+public enum WorkbenchAppearance: String, CaseIterable, Sendable {
+  case light, dark, system
+  public var title: String {
+    switch self {
+    case .light: "맑은 물"
+    case .dark: "깊은 물"
+    case .system: "시스템 설정"
+    }
+  }
+}
+
 public enum RepositoryLayout: String, Codable, CaseIterable, Sendable {
   case tabs, tracks
   public var title: String { self == .tabs ? "가로 탭" : "저장소 트랙" }
@@ -26,10 +37,12 @@ public enum InspectorVisibility: String, Codable, CaseIterable, Sendable {
   }
 }
 public enum LayoutPreset: String, CaseIterable, Identifiable, Sendable {
-  case classic, review, tracks
+  case focus, balanced, classic, review, tracks
   public var id: String { rawValue }
   public var title: String {
     switch self {
+    case .focus: "집중"
+    case .balanced: "균형"
     case .classic: "클래식"
     case .review: "코드 검토"
     case .tracks: "저장소 트랙"
@@ -38,6 +51,11 @@ public enum LayoutPreset: String, CaseIterable, Identifiable, Sendable {
   public var configuration: LayoutConfiguration {
     var value = LayoutConfiguration()
     switch self {
+    case .focus, .balanced:
+      value.graph = .hidden
+      value.inspector = self == .focus ? .hidden : .visible
+      value.splitDiff = false
+      value.dock = self == .focus ? .focused : .balanced
     case .classic: break
     case .review: value.graph = .hidden
     case .tracks:
@@ -74,23 +92,29 @@ public struct LayoutConfiguration: Codable, Equatable, Sendable {
 @MainActor
 public final class LayoutPreferences: ObservableObject {
   @Published public private(set) var configuration: LayoutConfiguration
+  @Published public var appearance: WorkbenchAppearance {
+    didSet { defaults.set(appearance.rawValue, forKey: "workbench.appearance.v1") }
+  }
   private let defaults: UserDefaults
   private let key = "workbench.layout.v1"
   private var dockUndo: [DockLayout] = []
   public init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
+    appearance = defaults.string(forKey: "workbench.appearance.v1")
+      .flatMap(WorkbenchAppearance.init(rawValue:)) ?? .light
     configuration =
       defaults.data(forKey: key)
       .flatMap { try? JSONDecoder().decode(LayoutConfiguration.self, from: $0) }?
-      .normalized ?? LayoutConfiguration().normalized
+      .normalized ?? LayoutPreset.focus.configuration.normalized
   }
   public var preset: LayoutPreset? {
     LayoutPreset.allCases.first {
       var current = configuration
-      var proposed = $0.configuration
+      var proposed = $0.configuration.normalized
+      let proposedDock = proposed.dock!
       current.dock = nil
       proposed.dock = nil
-      return current == proposed && dockLayout.sameArrangement(as: DockLayout.legacy(proposed))
+      return current == proposed && dockLayout.sameArrangement(as: proposedDock)
     }
   }
   public var dockLayout: DockLayout { configuration.dock! }
@@ -119,9 +143,16 @@ public final class LayoutPreferences: ObservableObject {
       selectPane(pane)
       return
     }
+    // Reuse an existing utility group; opening a reference should not grow another column.
+    if [.commit, .stash, .details].contains(pane),
+      let utility = [WorkbenchPane.commit, .stash, .details].first(where: { dockLayout.contains($0) })
+    {
+      dockPane(pane, nextTo: utility, edge: .center)
+      return
+    }
     let target = dockLayout.contains(.diff) ? WorkbenchPane.diff : dockLayout.panes.first
     dockPane(
-      pane, nextTo: target, edge: pane == .graph ? .top : (pane == .branches ? .center : .right))
+      pane, nextTo: target, edge: pane == .graph ? .bottom : (pane == .branches ? .center : .right))
   }
   public func selectPane(_ pane: WorkbenchPane) {
     update { $0.dock = dockLayout.selecting(pane) }

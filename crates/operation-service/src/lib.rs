@@ -879,7 +879,11 @@ impl Service {
                 .ok_or_else(|| anyhow::anyhow!("missing_parameter: {key}"))
         };
         match request.method.as_str() {
-            "get_task_context" | "save_task_context" | "run_git_check" | "record_verification_report" => self.handle_task_context(&request.method, p),
+            "get_task_context" | "save_task_context" | "run_git_check" | "record_verification_report" => {
+                optional_id(&p, "op_id")?;
+                optional_id(&p, "context_op_id")?;
+                self.handle_task_context(&request.method, p)
+            }
             "list_workspaces" => Ok(json!([{"schema_version":1,"id":self.workspace.id,"repositories":self.workspace.repositories,"groups":self.workspace.groups}])),
             "list_recipes" => Ok(json!(self.workspace.recipes.iter().map(|r|json!({"id":r.id,"repo_id":r.repo_id,"revision":r.revision,"writes":r.writes,"trusted":r.trusted_hash.is_some(),"target":r.target,"configuration":r.configuration})).collect::<Vec<_>>())),
             "plan_task" => Ok(serde_json::to_value(self.plan(serde_json::from_value(p)?)?.summary()?)?),
@@ -894,8 +898,9 @@ impl Service {
             "events" => Ok(serde_json::to_value(if p.get("latest").and_then(Value::as_bool).unwrap_or(false) { self.recent_events()? } else { self.events(p.get("cursor").and_then(Value::as_i64).unwrap_or(0))? })?),
             "list_branches" => {
                 let repo_id = string("repo_id")?;
+                let op_id = optional_id(&p, "op_id")?;
                 let source = &self.target(repo_id, None)?;
-                let viewed = if let Some(id) = p.get("op_id").and_then(Value::as_str) {
+                let viewed = if let Some(id) = op_id {
                     let op = self.operation_summary(id)?;
                     let repo = op.repos.iter().find(|r| r.plan.repo_id == repo_id).context("unknown_task_repo")?;
                     if repo.baseline.is_some() { Some(self.target(repo_id, Some(id))?) } else { None }
@@ -903,11 +908,13 @@ impl Service {
                 Ok(serde_json::to_value(git::branches(source, viewed.as_deref())?)?)
             }
             "get_branch_history" => {
+                optional_id(&p, "op_id")?;
                 let source = &self.target(string("repo_id")?, None)?;
                 Ok(serde_json::to_value(git::branch_history(source, string("branch_ref")?, string("tip_oid")?)?)?)
             }
             "list_stashes" | "get_stash" | "get_stash_diff" => {
                 // refs/stash is repository-wide, including when a Task has no worktree yet.
+                optional_id(&p, "op_id")?;
                 let path = &self.target(string("repo_id")?, None)?;
                 match request.method.as_str() {
                     "list_stashes" => Ok(serde_json::to_value(git::stashes(path)?)?),
@@ -916,28 +923,38 @@ impl Service {
                 }
             }
             "get_repo_status" | "get_diff" => {
-                let path=self.target(string("repo_id")?,p.get("op_id").and_then(Value::as_str))?;
+                let op_id=optional_id(&p, "op_id")?;
+                let staged=if request.method == "get_diff" { optional_bool(&p, "staged", false)? } else { false };
+                let path=self.target(string("repo_id")?,op_id)?;
                 // Reads must not wait behind preparation or hide cancel controls.
                 // The Git adapter checks before/after snapshots for drift.
                 if request.method == "get_repo_status" { Ok(serde_json::to_value(git::view(&path)?)?) }
-                else { Ok(serde_json::to_value(git::diff(&path,string("path")?,p.get("staged").and_then(Value::as_bool).unwrap_or(false))?)?) }
+                else { Ok(serde_json::to_value(git::diff(&path,string("path")?,staged)?)?) }
             }
             "stage_hunk" | "commit" => {
                 let repo_id=string("repo_id")?;
+                let allowed: &[&str] = if request.method == "stage_hunk" {
+                    &["repo_id", "op_id", "path", "staged", "hunk_index", "snapshot_hash", "diff_hash"]
+                } else {
+                    &["repo_id", "op_id", "snapshot_hash", "message"]
+                };
+                reject_unknown_parameters(&p, allowed)?;
+                let op_id=optional_id(&p, "op_id")?;
+                let staged=if request.method == "stage_hunk" { optional_bool(&p, "staged", false)? } else { false };
                 let _guard=self.mutations.try_lock().map_err(|_| anyhow::anyhow!("repository_busy"))?;
                 ensure!(!self.is_stopping(), "service_stopping");
-                if let Some(id)=p.get("op_id").and_then(Value::as_str) {
+                if let Some(id)=op_id {
                     let op=self.operation_summary(id)?;
                     let repo=op.repos.iter().find(|repo| repo.plan.repo_id==repo_id).context("unknown_task_repo")?;
                     ensure!(repo.state==RepoState::Ready, "task_not_ready");
                 }
                 // Resolve after waiting for preparation/mutation, never reuse a queued target.
-                let path=self.target(repo_id,p.get("op_id").and_then(Value::as_str))?;
+                let path=self.target(repo_id,op_id)?;
                 let _lock=repo_lock(&path)?;
-                let path=self.target(repo_id,p.get("op_id").and_then(Value::as_str))?;
+                let path=self.target(repo_id,op_id)?;
                 match request.method.as_str() {
                     "stage_hunk" => {
-                        git::stage_hunk(&path,string("path")?,p.get("staged").and_then(Value::as_bool).unwrap_or(false),p.get("hunk_index").and_then(Value::as_u64).context("missing_hunk_index")? as usize,string("snapshot_hash")?,string("diff_hash")?)?;
+                        git::stage_hunk(&path,string("path")?,staged,p.get("hunk_index").and_then(Value::as_u64).context("missing_hunk_index")? as usize,string("snapshot_hash")?,string("diff_hash")?)?;
                         let view = git::fresh_deadline(std::time::Duration::from_secs(15), || git::view(&path)).ok();
                         Ok(json!({"status":"staged","refresh_required":view.is_none(),"view":view}))
                     }
@@ -956,6 +973,37 @@ impl Service {
             _ => bail!("unknown_method"),
         }
     }
+}
+
+// A malformed optional scope must never become the original repository scope.
+// Null remains equivalent to omission, matching the typed context requests.
+fn optional_id<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
+        _ => bail!("invalid_parameter: {key} must be a nonempty string or null"),
+    }
+}
+
+fn optional_bool(params: &Value, key: &str, default: bool) -> Result<bool> {
+    match params.get(key) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => bail!("invalid_parameter: {key} must be a boolean"),
+    }
+}
+
+fn reject_unknown_parameters(params: &Value, allowed: &[&str]) -> Result<()> {
+    let params = params
+        .as_object()
+        .context("invalid_parameter: expected an object")?;
+    for key in params.keys() {
+        ensure!(
+            allowed.contains(&key.as_str()),
+            "invalid_parameter: unknown field {key}"
+        );
+    }
+    Ok(())
 }
 
 fn verify_scope(recipe: &Recipe, before: &Snapshot, after: &Snapshot) -> Result<()> {
@@ -1193,8 +1241,20 @@ mod lifecycle_tests {
             params: json!({"repo_id":"api","op_id":op.id}),
         });
         assert!(read.error.is_none());
-        for method in ["stage_hunk", "commit"] {
-            let response = service.dispatch(Request { method: method.into(), params: json!({"repo_id":"api","op_id":op.id,"path":"Config/Version.xcconfig","hunk_index":0,"snapshot_hash":"unused","diff_hash":"unused","message":"must not write"}) });
+        for (method, params) in [
+            (
+                "stage_hunk",
+                json!({"repo_id":"api","op_id":op.id,"path":"Config/Version.xcconfig","hunk_index":0,"snapshot_hash":"unused","diff_hash":"unused"}),
+            ),
+            (
+                "commit",
+                json!({"repo_id":"api","op_id":op.id,"snapshot_hash":"unused","message":"must not write"}),
+            ),
+        ] {
+            let response = service.dispatch(Request {
+                method: method.into(),
+                params,
+            });
             assert_eq!(response.error.unwrap().code, "task_not_ready");
         }
         assert_eq!(git::snapshot(&failed.plan.worktree_path).unwrap(), before);
