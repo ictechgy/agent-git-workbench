@@ -280,6 +280,8 @@ public final class WorkbenchStore: ObservableObject {
       cancelDiffRead()
       selection = .init(repoId: repo.id, opId: op.id)
       contextOperationID = op.id
+      validatingSelection = true
+      configureTaskContext()
       clearStashReview()
       repository = nil
       diff = nil
@@ -624,6 +626,8 @@ public final class WorkbenchStore: ObservableObject {
       }
       if pinnedOperations != pinned { pinnedOperations = pinned }
       if unresolvedOperationIDs != unresolved { unresolvedOperationIDs = unresolved }
+      // Apply lookup authority before awaiting unrelated display metadata.
+      configureTaskContext()
       let neededDetails = pinned.values.sorted { $0.id < $1.id } + ops.filter { !requiredIDs.contains($0.id) }
       for op in neededDetails.filter({ tasks[$0.taskId] == nil }).prefix(8) {
         do {

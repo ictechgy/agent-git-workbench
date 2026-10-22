@@ -613,6 +613,10 @@ private final class ScopedContextReplies: @unchecked Sendable {
   var lookupFails = false
   var listFails = false
   var holdList = false
+  var holdListCall: Int?
+  var listCalls = 0
+  var holdTaskDetails = false
+  var heldTaskID: String?
   var workspaceID = "space"
   let arrived = Flag()
   let gate = DispatchSemaphore(value: 0)
@@ -627,7 +631,13 @@ private final class ScopedContextReplies: @unchecked Sendable {
     let method = request["method"] as? String ?? ""
     let params = request["params"] as? [String: Any] ?? [:]
     let hold = lock.withLock {
-      if method == "list_operations", holdList { holdList = false; return true }
+      if method == "list_operations" {
+        listCalls += 1
+        if holdList || holdListCall == listCalls { holdList = false; return true }
+      }
+      if method == "get_task", holdTaskDetails {
+        holdTaskDetails = false; heldTaskID = params["task_id"] as? String; return true
+      }
       return false
     }
     if hold { arrived.value = true; _ = gate.wait(timeout: .now() + .seconds(5)) }
@@ -777,6 +787,39 @@ private final class ScopedContextReplies: @unchecked Sendable {
   #expect(store.taskContext.bundle?.context.purpose == "repository intent")
 }
 
+@Test(arguments: [false, true]) @MainActor
+func selectedLookupFailureBlocksContextBeforeUnrelatedTaskDetailsFinish(originalFolder: Bool) async throws {
+  let replies = ScopedContextReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.selectTask(try #require(store.operations.first)); try await settleSelection(store)
+  if originalFolder { store.select(.init(repoId: "a")); try await settleSelection(store) }
+  #expect(store.taskContext.loaded)
+  store.taskContext.draft?.notes = "keep this unsaved Task draft"
+  let contextRequests = replies.lock.withLock { replies.requests.count }
+  replies.lock.withLock { replies.paginated = true; replies.lookupFails = true; replies.holdTaskDetails = true }
+  let refreshing = Task { await store.refresh() }; try await wait(replies.arrived)
+  #expect(replies.lock.withLock { replies.heldTaskID } == "new-task-0")
+  #expect(store.contextOperation?.id == "op"); #expect(store.taskInformationLookupFailed)
+  #expect(store.contextTaskInformationUnavailable); #expect(!store.taskContext.loaded)
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.requests.count } == contextRequests)
+  #expect(replies.lock.withLock { replies.contexts["op"]?.revision } == 7)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.revision } == 7)
+  #expect(store.taskContext.draft?.notes == "keep this unsaved Task draft")
+  #expect(store.taskContext.isDirty)
+  replies.gate.signal(); await refreshing.value
+  #expect(!store.taskContext.loaded)
+  #expect(store.taskContext.draft?.notes == "keep this unsaved Task draft")
+  replies.lock.withLock { replies.lookupFails = false }
+  await store.refresh()
+  #expect(!store.contextTaskInformationUnavailable); #expect(store.taskContext.loaded)
+  #expect(store.taskContext.draft?.notes == "keep this unsaved Task draft")
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.contexts["op"]?.notes } == "keep this unsaved Task draft")
+  #expect(replies.lock.withLock { replies.contexts["op"]?.revision } == 8)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.revision } == 7)
+}
+
 @Test @MainActor func unresolvedSelectedTaskIsLookupFailureRatherThanUnpreparedFolder() async throws {
   let replies = ScopedContextReplies(); let server = try TestService { replies.respond($0) }
   let store = WorkbenchStore(socketPath: server.path); await store.connect()
@@ -839,6 +882,37 @@ private final class ScopedContextReplies: @unchecked Sendable {
   #expect(!store.preparationHint.contains("읽지 못했습니다"))
   replies.gate.signal(); await reconnect.value
   #expect(!store.taskInformationUnavailable)
+}
+
+@Test @MainActor func exampleAutoSelectionClearsRepoContextBeforeTaskRefresh() async throws {
+  let replies = ScopedContextReplies(); replies.holdListCall = 2
+  let server = try TestService { replies.respond($0) }
+  let isolated = URL(fileURLWithPath: "/tmp/river-example-runtime-\(UUID().uuidString)")
+  let store = WorkbenchStore(runtime: WorkspaceRuntime(storageDirectory: isolated, runtimeDirectory: isolated))
+  let recent = RecentWorkspace(id: UUID(), name: "Example", repositoryPath: "/tmp/synthetic", isExample: true, lastOpened: Date())
+  let opening = Task { await store.openWorkspace(message: "Example") { WorkspaceSession(recent: recent, socketPath: server.path) } }
+  try await wait(replies.arrived)
+  #expect(replies.lock.withLock { replies.listCalls } == 2)
+  #expect(store.selection?.opId == "op"); #expect(store.contextOperation?.id == "op")
+  #expect(store.validatingSelection); #expect(!store.taskContext.loaded)
+  #expect(store.taskContext.bundle == nil)
+  let contextRequests = replies.lock.withLock { replies.requests.count }
+  store.taskContext.draft?.notes = "Task notes typed while loading"
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.requests.count } == contextRequests)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.revision } == 7)
+  replies.gate.signal(); await opening.value
+  #expect(!store.validatingSelection); #expect(store.taskContext.loaded)
+  #expect(store.taskContext.bundle?.context.purpose == "Task intent")
+  #expect(store.taskContext.draft?.notes == "")
+  store.taskContext.draft?.notes = "Task notes after loading"
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.contexts["op"]?.notes } == "Task notes after loading")
+  #expect(replies.lock.withLock { replies.contexts["op"]?.revision } == 8)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.revision } == 7)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.notes } == "")
+  let save = try #require(replies.lock.withLock { replies.requests.last { $0.method == "save_task_context" } })
+  #expect(save.scope == "op"); #expect(save.target == nil)
 }
 
 @Test @MainActor func failedWorkspaceHandshakeKeepsCommittedIdentityClientAndDrafts() async throws {
