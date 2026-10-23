@@ -20,7 +20,15 @@ enum Policy {
 }
 
 fn config(path: &Path) -> Result<Vec<(String, String)>> {
-    let out = run_local(path, &["config", "--null", "--list"], false)?;
+    config_scope(path, false)
+}
+fn config_scope(path: &Path, local_only: bool) -> Result<Vec<(String, String)>> {
+    let args: &[&str] = if local_only {
+        &["config", "--local", "--no-includes", "--null", "--list"]
+    } else {
+        &["config", "--null", "--list"]
+    };
+    let out = run_local(path, args, false)?;
     let mut values = Vec::new();
     for item in out.stdout.split(|b| *b == 0).filter(|b| !b.is_empty()) {
         let text = std::str::from_utf8(item).context("unsupported_remote_config")?;
@@ -607,20 +615,18 @@ pub fn configure(
     );
     // Restrict edits to local config; imported/global remotes must not be
     // silently shadowed. Git's own remove also updates upstream/ref metadata.
-    let local = run_local(
-        path,
-        &[
-            "config",
-            "--local",
-            "--no-includes",
-            "--null",
-            "--get-regexp",
-            &format!("^remote\\.{}\\.", name.replace('.', "\\.")),
-        ],
-        false,
-    );
     if action != "add" {
-        ensure!(local.is_ok(), "remote_not_local");
+        let prefix = format!("remote.{name}.");
+        let selected = |cfg: Vec<(String, String)>| {
+            cfg.into_iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .collect::<Vec<_>>()
+        };
+        let effective = selected(config(path)?);
+        let local = selected(config_scope(path, true)?);
+        // Owning one local property is insufficient: inherited values would
+        // survive the edit and could add a second effective endpoint.
+        ensure!(!local.is_empty() && local == effective, "remote_not_local");
     }
     match action {
         "remove" => {
@@ -2376,5 +2382,60 @@ mod tests {
             );
         }
         assert_eq!(fs::read(f.client.join(".git/config")).unwrap(), original);
+        // A direct local property does not make an inherited endpoint (or an
+        // inherited fetch policy beside a local endpoint) locally owned.
+        for imported_url in [true, false] {
+            let imported_property = if imported_url {
+                "url = https://host/imported.git"
+            } else {
+                "fetch = +refs/heads/*:refs/remotes/mixed/*"
+            };
+            fs::write(
+                &imported,
+                format!("[remote \"mixed\"]\n\t{imported_property}\n"),
+            )
+            .unwrap();
+            let local_key = if imported_url {
+                "remote.mixed.fetch"
+            } else {
+                "remote.mixed.url"
+            };
+            let local_value = if imported_url {
+                "+refs/heads/*:refs/remotes/mixed/*"
+            } else {
+                "https://host/local.git"
+            };
+            git(&f.client, &["config", "--local", local_key, local_value]);
+            let original = fs::read(f.client.join(".git/config")).unwrap();
+            let imported_original = fs::read(&imported).unwrap();
+            let current = state(&f.client).unwrap();
+            assert!(
+                current
+                    .remotes
+                    .iter()
+                    .any(|remote| remote.name == "mixed" && remote.supported)
+            );
+            for action in ["update", "remove"] {
+                assert_eq!(
+                    configure(
+                        &f.client,
+                        &current.state_hash,
+                        action,
+                        "mixed",
+                        (action == "update").then_some("https://host/repaired.git"),
+                        None
+                    )
+                    .unwrap_err()
+                    .to_string(),
+                    "remote_not_local"
+                );
+                assert_eq!(fs::read(f.client.join(".git/config")).unwrap(), original);
+                assert_eq!(fs::read(&imported).unwrap(), imported_original);
+            }
+            git(
+                &f.client,
+                &["config", "--local", "--remove-section", "remote.mixed"],
+            );
+        }
     }
 }
