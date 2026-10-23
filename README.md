@@ -14,7 +14,7 @@ The app UI and detailed guides are currently in Korean. English translations of 
 
 ## Install on macOS
 
-**[Download River 0.1.0-alpha.1 for Apple Silicon](https://github.com/ictechgy/agent-git-workbench/releases/download/v0.1.0-alpha.1/River-0.1.0-alpha.1-macos-arm64.dmg)** · [Release notes and checksums](https://github.com/ictechgy/agent-git-workbench/releases/tag/v0.1.0-alpha.1)
+**[Download River 0.1.0-alpha.1 for Apple Silicon](https://github.com/ictechgy/river/releases/download/v0.1.0-alpha.1/River-0.1.0-alpha.1-macos-arm64.dmg)** · [Release notes and checksums](https://github.com/ictechgy/river/releases/tag/v0.1.0-alpha.1)
 
 - **Apple Silicon (arm64) only.** This release does not include an Intel build.
 - **macOS 14 or later is the declared target.** Runtime testing has only covered macOS 27.0.1; compatibility with older supported versions has not been verified.
@@ -112,8 +112,8 @@ You need macOS, Xcode with Swift 6 or later, Rust/Cargo, Git, and Python 3. Vali
 The tested environment is macOS 27.0.1, Swift 6.4, Rust 1.97.1, Git 2.54.0, and Python 3.9.6. These are tested versions, not a complete minimum-version compatibility matrix.
 
 ```sh
-git clone https://github.com/ictechgy/agent-git-workbench.git
-cd agent-git-workbench
+git clone https://github.com/ictechgy/river.git
+cd river
 python3 scripts/build_macos.py
 open "build/macos/River.app"
 ```

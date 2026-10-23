@@ -16,7 +16,7 @@ A native macOS Git app for reviewing work across repositories and worktrees.
 
 ## macOS에 설치하기
 
-**[Apple Silicon용 River 0.1.0-alpha.1 다운로드](https://github.com/ictechgy/agent-git-workbench/releases/download/v0.1.0-alpha.1/River-0.1.0-alpha.1-macos-arm64.dmg)** · [릴리스 정보와 체크섬](https://github.com/ictechgy/agent-git-workbench/releases/tag/v0.1.0-alpha.1)
+**[Apple Silicon용 River 0.1.0-alpha.1 다운로드](https://github.com/ictechgy/river/releases/download/v0.1.0-alpha.1/River-0.1.0-alpha.1-macos-arm64.dmg)** · [릴리스 정보와 체크섬](https://github.com/ictechgy/river/releases/tag/v0.1.0-alpha.1)
 
 - **Apple Silicon(arm64) 전용입니다.** 이번 릴리스에는 Intel 빌드가 없습니다.
 - **선언된 지원 대상은 macOS 14 이상입니다.** 실행 검증은 macOS 27.0.1에서만 했으며, 이전 버전에서의 호환성은 아직 확인하지 않았습니다.
@@ -114,8 +114,8 @@ macOS가 개발자를 확인할 수 없거나 앱을 검사할 수 없다는 이
 검증 환경은 macOS 27.0.1 / Swift 6.4 / Rust 1.97.1 / Git 2.54.0 / Python 3.9.6입니다. 이 목록은 테스트한 버전이며 전체 최소 버전 호환성 표는 아닙니다.
 
 ```sh
-git clone https://github.com/ictechgy/agent-git-workbench.git
-cd agent-git-workbench
+git clone https://github.com/ictechgy/river.git
+cd river
 python3 scripts/build_macos.py
 open "build/macos/River.app"
 ```
