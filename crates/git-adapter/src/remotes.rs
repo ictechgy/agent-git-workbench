@@ -812,10 +812,7 @@ fn finish_pull(
 }
 fn validate_branch(path: &Path, branch: &str) -> Result<()> {
     ensure!(
-        !branch.is_empty()
-            && branch.len() <= 1024
-            && branch.bytes().all(|b| b.is_ascii_graphic())
-            && !branch.starts_with('-'),
+        !branch.is_empty() && branch.len() <= 1024 && !branch.starts_with('-'),
         "invalid_remote_branch"
     );
     super::validate_branch(path, &format!("refs/heads/{branch}"))
@@ -1386,6 +1383,112 @@ mod tests {
         for name in names {
             assert!(refs.iter().any(|branch| branch.name == name));
         }
+        for (index, name) in names.into_iter().enumerate() {
+            let before = git(&f.client, &["rev-parse", "HEAD"]);
+            fs::write(f.client.join(format!("unicode-pull-{index}")), "incoming\n").unwrap();
+            git(&f.client, &["add", "."]);
+            git(
+                &f.client,
+                &["commit", "-m", "prepare Unicode target advance"],
+            );
+            let incoming = git(&f.client, &["rev-parse", "HEAD"]);
+            git(
+                &f.client,
+                &[
+                    "push",
+                    f.bare.to_str().unwrap(),
+                    &format!("HEAD:refs/heads/{name}"),
+                ],
+            );
+            git(&f.client, &["reset", "--hard", &before]);
+            assert!(
+                pull_policy(
+                    &f.client,
+                    &f.state().state_hash,
+                    "origin",
+                    name,
+                    Policy::Fixture
+                )
+                .unwrap()
+            );
+            assert_eq!(git(&f.client, &["rev-parse", "HEAD"]), incoming);
+            assert_eq!(
+                git(&f.client, &["config", "branch.main.merge"]),
+                format!("refs/heads/{name}")
+            );
+            fs::write(f.client.join(format!("unicode-push-{index}")), "outgoing\n").unwrap();
+            git(&f.client, &["add", "."]);
+            git(&f.client, &["commit", "-m", "push Unicode target"]);
+            assert!(
+                push_policy(
+                    &f.client,
+                    &f.state().state_hash,
+                    "origin",
+                    name,
+                    Policy::Fixture
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                git(&f.bare, &["rev-parse", &format!("refs/heads/{name}")]),
+                git(&f.client, &["rev-parse", "HEAD"])
+            );
+            assert_eq!(
+                git(&f.client, &["config", "branch.main.merge"]),
+                format!("refs/heads/{name}")
+            );
+        }
+        let state = f.state();
+        let snapshot = super::super::snapshot(&f.client).unwrap();
+        let cfg = config(&f.client).unwrap();
+        let server_refs = git(
+            &f.bare,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/",
+            ],
+        );
+        for invalid in ["bad branch", "bad\nbranch", "-invalid"] {
+            assert_eq!(
+                pull_policy(
+                    &f.client,
+                    &state.state_hash,
+                    "origin",
+                    invalid,
+                    Policy::Fixture
+                )
+                .unwrap_err()
+                .to_string(),
+                "invalid_remote_branch"
+            );
+            assert_eq!(
+                push_policy(
+                    &f.client,
+                    &state.state_hash,
+                    "origin",
+                    invalid,
+                    Policy::Fixture
+                )
+                .unwrap_err()
+                .to_string(),
+                "invalid_remote_branch"
+            );
+        }
+        assert_eq!(super::super::snapshot(&f.client).unwrap(), snapshot);
+        assert_eq!(config(&f.client).unwrap(), cfg);
+        assert_eq!(
+            git(
+                &f.bare,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads/"
+                ]
+            ),
+            server_refs
+        );
+        assert_eq!(f.state().state_hash, state.state_hash);
     }
     #[test]
     fn fetch_prunes_only_reviewed_remote_and_state_pins_config_and_source() {

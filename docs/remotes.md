@@ -15,6 +15,8 @@ Open **원격** beside the current folder to inspect a remote's fetch/push URLs,
 
 Pull and push require a confirmation showing the folder, local branch, URL and remote branch. The engine rechecks the reviewed state before performing the operation. Changes to the folder, HEAD, branch, remote configuration or fetched references make that state stale; refresh and confirm again.
 
+Transfer branch names follow Git's `check-ref-format` validation, including valid UTF-8 names such as Korean branches. Names are bounded to 1,024 bytes and cannot begin with an option marker.
+
 After a confirmed push or pull integration, River configures upstream tracking only if the intended branch/HEAD and captured configuration still match. A concurrent external edit is preserved. If tracking setup is skipped or fails, the response still reports the confirmed operation and asks the user to inspect tracking settings.
 
 ## Authentication and supported URLs
