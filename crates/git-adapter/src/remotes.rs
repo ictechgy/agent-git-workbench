@@ -670,7 +670,9 @@ fn parse_fetch(output: &[u8], name: &str) -> Result<BTreeMap<String, Option<Stri
             matches!(flag, b' ' | b'+' | b'*' | b'=' | b'-'),
             "invalid_remote_fetch_result"
         );
-        let fields: Vec<_> = line[2..].split_whitespace().collect();
+        // Git's porcelain separators are ASCII spaces. A valid UTF-8 ref may
+        // contain Unicode whitespace (for example U+00A0) as name data.
+        let fields: Vec<_> = line[2..].split_ascii_whitespace().collect();
         ensure!(
             fields.len() == 3 && fields[2].starts_with(&prefix) && fields[2].len() > prefix.len(),
             "invalid_remote_fetch_result"
@@ -701,10 +703,10 @@ fn parse_fetch(output: &[u8], name: &str) -> Result<BTreeMap<String, Option<Stri
     }
     Ok(updates)
 }
-pub fn pull(path: &Path, hash: &str, name: &str, branch: &str) -> Result<()> {
+pub fn pull(path: &Path, hash: &str, name: &str, branch: &str) -> Result<bool> {
     pull_policy(path, hash, name, branch, Policy::Network)
 }
-fn pull_policy(path: &Path, hash: &str, name: &str, branch: &str, policy: Policy) -> Result<()> {
+fn pull_policy(path: &Path, hash: &str, name: &str, branch: &str, policy: Policy) -> Result<bool> {
     validate_branch(path, branch)?;
     let initial = expected(path, hash, policy)?;
     ensure!(
@@ -733,7 +735,7 @@ fn integrate_fetched(
     name: &str,
     branch: &str,
     target: &str,
-) -> Result<()> {
+) -> Result<bool> {
     ensure!(
         &super::snapshot(path)? == local_snapshot && config(path)? == cfg,
         "stale_remote_state"
@@ -787,8 +789,26 @@ fn integrate_fetched(
         ],
         true,
     )?;
-    set_upstream(path, &local_branch, name, branch).context("remote_outcome_unknown")?;
-    Ok(())
+    // Integration is confirmed. Preserve choices made by another Git process
+    // while checkout ran; optional tracking failures cannot undo that success.
+    Ok(finish_pull(path, cfg, &local_branch, name, branch, target))
+}
+fn finish_pull(
+    path: &Path,
+    cfg: &[(String, String)],
+    local_branch: &str,
+    remote: &str,
+    branch: &str,
+    target: &str,
+) -> bool {
+    if run_local(path, &["symbolic-ref", "--quiet", "HEAD"], false)
+        .is_ok_and(|current| current.stdout == format!("{local_branch}\n").as_bytes())
+        && super::oid(path, "HEAD").is_ok_and(|current| current == target)
+        && config(path).is_ok_and(|current| current == cfg)
+    {
+        return set_upstream(path, local_branch, remote, branch).is_ok();
+    }
+    false
 }
 fn validate_branch(path: &Path, branch: &str) -> Result<()> {
     ensure!(
@@ -1332,6 +1352,42 @@ mod tests {
         }
     }
     #[test]
+    fn fetch_preserves_unicode_and_nbsp_refs_while_pulling_ascii_main() {
+        let f = Fixture::new();
+        let names = ["기능/강줄기", "feature/a\u{00a0}b"];
+        for name in names {
+            git(&f.source, &["branch", name]);
+            git(&f.source, &["push", f.bare.to_str().unwrap(), name]);
+        }
+        let original = git(&f.client, &["rev-parse", "HEAD"]);
+        let fetched = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        for name in names {
+            assert_eq!(
+                fetched[&format!("refs/remotes/origin/{name}")].as_deref(),
+                Some(original.as_str())
+            );
+        }
+        f.advance();
+        assert!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "main",
+                Policy::Fixture
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(f.client.join("hello.txt")).unwrap(),
+            "two\n"
+        );
+        let refs = f.state().remotes.remove(0).branches;
+        for name in names {
+            assert!(refs.iter().any(|branch| branch.name == name));
+        }
+    }
+    #[test]
     fn fetch_prunes_only_reviewed_remote_and_state_pins_config_and_source() {
         let f = Fixture::new();
         git(&f.source, &["branch", "gone"]);
@@ -1405,14 +1461,16 @@ mod tests {
             "remote_worktree_dirty"
         );
         fs::remove_file(f.client.join("untracked")).unwrap();
-        pull_policy(
-            &f.client,
-            &f.state().state_hash,
-            "origin",
-            "main",
-            Policy::Fixture,
-        )
-        .unwrap();
+        assert!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "main",
+                Policy::Fixture,
+            )
+            .unwrap()
+        );
         assert_eq!(
             fs::read_to_string(f.client.join("hello.txt")).unwrap(),
             "two\n"
@@ -1571,6 +1629,134 @@ mod tests {
             .to_string(),
             "remote_branch_missing"
         );
+    }
+    #[test]
+    fn confirmed_pull_preserves_external_tracking_choices_after_merge() {
+        let f = Fixture::new();
+        f.advance();
+        let cfg = config(&f.client).unwrap();
+        assert!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "main",
+                Policy::Fixture
+            )
+            .unwrap()
+        );
+        let target = git(&f.source, &["rev-parse", "HEAD"]);
+        assert_eq!(git(&f.client, &["rev-parse", "HEAD"]), target);
+        // Deterministic post-merge seam: another local Git process changes
+        // endpoint and tracking choices while checkout has completed.
+        git(
+            &f.client,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://elsewhere.invalid/preserved.git",
+            ],
+        );
+        git(&f.client, &["config", "branch.main.remote", "preserved"]);
+        git(
+            &f.client,
+            &["config", "branch.main.merge", "refs/heads/preserved"],
+        );
+        assert!(!finish_pull(
+            &f.client,
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "main",
+            &target
+        ));
+        assert_eq!(git(&f.client, &["rev-parse", "HEAD"]), target);
+        assert_eq!(
+            git(&f.client, &["config", "remote.origin.url"]),
+            "https://elsewhere.invalid/preserved.git"
+        );
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.remote"]),
+            "preserved"
+        );
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.merge"]),
+            "refs/heads/preserved"
+        );
+    }
+    #[test]
+    fn confirmed_pull_skips_tracking_after_branch_head_or_optional_io_changes() {
+        let f = Fixture::new();
+        f.advance();
+        assert!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "main",
+                Policy::Fixture
+            )
+            .unwrap()
+        );
+        let target = git(&f.client, &["rev-parse", "HEAD"]);
+        let cfg = config(&f.client).unwrap();
+        fs::write(f.client.join(".git/config.lock"), "external lock").unwrap();
+        assert!(!finish_pull(
+            &f.client,
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "main",
+            &target
+        ));
+        fs::remove_file(f.client.join(".git/config.lock")).unwrap();
+        assert_eq!(git(&f.client, &["rev-parse", "HEAD"]), target);
+        assert!(!finish_pull(
+            &f._dir.path().join("missing"),
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "main",
+            &target
+        ));
+        git(&f.client, &["branch", "external"]);
+        git(&f.client, &["symbolic-ref", "HEAD", "refs/heads/external"]);
+        assert!(!finish_pull(
+            &f.client,
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "main",
+            &target
+        ));
+        assert_eq!(
+            git(&f.client, &["symbolic-ref", "HEAD"]),
+            "refs/heads/external"
+        );
+        git(&f.client, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        let tree = git(&f.client, &["rev-parse", "HEAD^{tree}"]);
+        let advanced = git(
+            &f.client,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &target,
+                "-m",
+                "external advance after merge",
+            ],
+        );
+        git(&f.client, &["update-ref", "refs/heads/main", &advanced]);
+        assert!(!finish_pull(
+            &f.client,
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "main",
+            &target
+        ));
+        assert_eq!(git(&f.client, &["rev-parse", "HEAD"]), advanced);
+        assert_eq!(config(&f.client).unwrap(), cfg);
     }
     #[test]
     fn acknowledged_push_preserves_external_tracking_edits_and_reports_success() {

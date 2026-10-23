@@ -15,7 +15,7 @@ Open **원격** beside the current folder to inspect a remote's fetch/push URLs,
 
 Pull and push require a confirmation showing the folder, local branch, URL and remote branch. The engine rechecks the reviewed state before performing the operation. Changes to the folder, HEAD, branch, remote configuration or fetched references make that state stale; refresh and confirm again.
 
-After a confirmed push, River configures upstream tracking only if the captured local state and configuration still match. A concurrent external edit is preserved. If tracking setup is skipped or fails, the response still reports the confirmed push and asks the user to inspect tracking settings.
+After a confirmed push or pull integration, River configures upstream tracking only if the intended branch/HEAD and captured configuration still match. A concurrent external edit is preserved. If tracking setup is skipped or fails, the response still reports the confirmed operation and asks the user to inspect tracking settings.
 
 ## Authentication and supported URLs
 

@@ -223,7 +223,11 @@ impl Service {
                     |path| {
                         if method == "pull_remote" {
                             git::remotes::pull(path, &p.expected_state_hash, &p.remote, &p.branch)
-                                .map(|()| None)
+                                .map(|tracking_updated| {
+                                    (!tracking_updated).then_some(
+                                        "Pull은 완료했습니다. 추적 설정을 자동으로 갱신하지 못했으므로 설정을 확인해 주세요.",
+                                    )
+                                })
                         } else {
                             git::remotes::push(path, &p.expected_state_hash, &p.remote, &p.branch)
                                 .map(push_tracking_notice)
@@ -267,7 +271,8 @@ impl Service {
         let completion_message = mutate(&path)?;
         // A completed remote write must remain successful when its optional
         // presentation refresh fails. The caller can reload without replaying.
-        let state = git::fresh_deadline(std::time::Duration::from_secs(15), || {
+        // Inherit the request deadline so this read cannot consume the response reserve.
+        let state = git::with_deadline(std::time::Duration::from_secs(15), || {
             git::remotes::state(&path)
         })
         .ok();
