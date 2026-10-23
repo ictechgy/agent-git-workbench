@@ -216,10 +216,13 @@ public final class LayoutPreferences: ObservableObject {
     {
       value.dock = DockLayout.legacy(value)
     }
+    let next = value.normalized
+    guard !Self.sameConfiguration(next, configuration) else { return }
     var styleOnly = configuration
-    styleOnly.splitDiff = value.splitDiff
-    if value != styleOnly { restorePaneLayout() }
-    set(value)
+    styleOnly.splitDiff = next.splitDiff
+    if !Self.sameConfiguration(next, styleOnly) { restorePaneLayout() }
+    rememberDock()
+    set(next)
   }
   public func dockPane(_ pane: WorkbenchPane, nextTo target: WorkbenchPane?, edge: DockEdge) {
     replaceDock(dockLayout.moving(pane, nextTo: target, edge: edge))
@@ -245,7 +248,9 @@ public final class LayoutPreferences: ObservableObject {
   }
   public func selectPane(_ pane: WorkbenchPane) {
     restorePaneLayout()
-    update { $0.dock = dockLayout.selecting(pane) }
+    var next = configuration
+    next.dock = dockLayout.selecting(pane)
+    set(next)
   }
   public func resizeDock(_ id: String, ratio: Double) {
     replaceDock(dockLayout.resizing(id, ratio: ratio))
@@ -310,7 +315,9 @@ public final class LayoutPreferences: ObservableObject {
     restorePaneLayout()
     guard let checked = value.validated, !checked.sameArrangement(as: dockLayout) else { return }
     rememberDock()
-    update { $0.dock = checked }
+    var next = configuration
+    next.dock = checked
+    set(next)
   }
   private func rememberDock() {
     dockUndo.append(configuration)

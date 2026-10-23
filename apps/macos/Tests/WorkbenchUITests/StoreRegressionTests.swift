@@ -1,6 +1,8 @@
+import AppKit
 import Combine
 import Darwin
 import Foundation
+import SwiftUI
 import Testing
 import WorkbenchProtocol
 @testable import WorkbenchRuntime
@@ -1756,4 +1758,142 @@ func completedCloneKeepsKnownOutcomeWhenFollowUpReadsFail(phase: String) async t
   #expect(FileManager.default.fileExists(atPath: destination.path)); #expect(!store.busy)
   #expect(store.submissionWarnings.isEmpty)
   await runtime.stopIdleServices()
+}
+
+// Use real production views and AppKit dispatch: opacity and hit-testing alone
+// do not unregister SwiftUI keyboard shortcuts or resign a native text editor.
+@Suite(.serialized) @MainActor
+struct FocusedDockKeyboardRegressionTests {
+  @Test func hiddenCommitShortcutCannotWriteAndRestoredCommitCan() async throws {
+    let replies = GitMutationReplies()
+    let server = try TestService { replies.respond($0) }
+    let store = WorkbenchStore(socketPath: server.path); await store.connect()
+    let suite = "river-dock-shortcut-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let layout = LayoutPreferences(defaults: defaults); layout.apply(.balanced)
+    store.commitMessage = "visible commit positive control"
+    #expect(store.canEdit); #expect(store.stagedCount == 1)
+    let (window, host) = mount(store: store, layout: layout, defaults: defaults)
+    defer { window.close() }
+    try await settle(host)
+
+    #expect(
+      window.performKeyEquivalent(
+        with: try key(window, characters: "\r", code: 36, modifiers: .command)))
+    try await awaitWrites(1, replies: replies, store: store)
+    #expect(replies.writeCount == 1); #expect(store.commitMessage.isEmpty)
+
+    store.commitMessage = "hidden commit must stay a draft"
+    layout.focusPane(.diff)
+    try await settle(host)
+    #expect(
+      !window.performKeyEquivalent(
+        with: try key(window, characters: "\r", code: 36, modifiers: .command)))
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(replies.writeCount == 1)
+    #expect(store.commitMessage == "hidden commit must stay a draft")
+    #expect(store.submissionWarnings.isEmpty)
+
+    layout.restorePaneLayout()
+    try await settle(host)
+    #expect(
+      window.performKeyEquivalent(
+        with: try key(window, characters: "\r", code: 36, modifiers: .command)))
+    try await awaitWrites(2, replies: replies, store: store)
+    #expect(replies.writeCount == 2); #expect(store.commitMessage.isEmpty)
+    withExtendedLifetime(server) {}
+  }
+
+  @Test func focusingDiffResignsHiddenEditorOnlyInItsOwningWindow() async throws {
+    let replies = GitMutationReplies()
+    let server = try TestService { replies.respond($0) }
+    let store = WorkbenchStore(socketPath: server.path); await store.connect()
+    let suite = "river-dock-editor-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let layout = LayoutPreferences(defaults: defaults); layout.apply(.balanced)
+    store.commitMessage = "visible editor draft"
+    let (window, host) = mount(store: store, layout: layout, defaults: defaults)
+    defer { window.close() }
+    try await settle(host)
+    let editor = try #require(
+      textViews(in: host).first { $0.isEditable && $0.string == store.commitMessage })
+    #expect(window.makeFirstResponder(editor)); #expect(window.firstResponder === editor)
+    window.sendEvent(try key(window, characters: "x", code: 7))
+    try await settle(host)
+    let visibleDraft = store.commitMessage
+    #expect(visibleDraft != "visible editor draft")  // Prove native text input reaches the visible editor.
+
+    let otherEditor = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 120))
+    otherEditor.string = "another window keeps its responder"
+    let otherWindow = NSWindow(
+      contentRect: NSRect(x: -19000, y: -19000, width: 300, height: 120),
+      styleMask: [.titled], backing: .buffered, defer: false)
+    otherWindow.isReleasedWhenClosed = false; otherWindow.contentView = otherEditor
+    otherWindow.makeKeyAndOrderFront(nil)
+    defer { otherWindow.close() }
+    #expect(otherWindow.makeFirstResponder(otherEditor))
+    #expect(otherWindow.firstResponder === otherEditor)
+    #expect(window.firstResponder === editor)
+
+    layout.focusPane(.diff)
+    try await settle(host)
+    #expect(window.firstResponder !== editor)
+    #expect(otherWindow.firstResponder === otherEditor)
+    window.sendEvent(try key(window, characters: "y", code: 16))
+    try await settle(host)
+    #expect(store.commitMessage == visibleDraft)
+    #expect(editor.string == visibleDraft)
+    #expect(otherEditor.string == "another window keeps its responder")
+    #expect(replies.writeCount == 0)
+    withExtendedLifetime(server) {}
+  }
+
+  private func mount(store: WorkbenchStore, layout: LayoutPreferences, defaults: UserDefaults)
+    -> (NSWindow, NSHostingView<WorkbenchRoot>)
+  {
+    _ = NSApplication.shared
+    let host = NSHostingView(
+      rootView: WorkbenchRoot(
+        store: store, layout: layout,
+        reading: ReadingPreferences(defaults: defaults)))
+    let window = NSWindow(
+      contentRect: NSRect(x: -20000, y: -20000, width: 1200, height: 800),
+      styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false; window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    return (window, host)
+  }
+  private func key(
+    _ window: NSWindow, characters: String, code: UInt16,
+    modifiers: NSEvent.ModifierFlags = []
+  ) throws -> NSEvent {
+    try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: modifiers,
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+        context: nil,
+        characters: characters, charactersIgnoringModifiers: characters, isARepeat: false,
+        keyCode: code))
+  }
+  private func settle(_ host: NSView) async throws {
+    for _ in 0..<10 {
+      host.layoutSubtreeIfNeeded()
+      try await Task.sleep(for: .milliseconds(15))
+    }
+    host.layoutSubtreeIfNeeded()
+  }
+  private func awaitWrites(_ count: Int, replies: GitMutationReplies, store: WorkbenchStore)
+    async throws
+  {
+    for _ in 0..<200 {
+      if replies.writeCount >= count && !store.busy { return }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("Production commit shortcut did not complete its synthetic request")
+  }
+  private func textViews(in view: NSView) -> [NSTextView] {
+    (view as? NSTextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
+  }
 }

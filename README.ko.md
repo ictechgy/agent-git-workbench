@@ -144,7 +144,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-위 환경의 개발자 로컬 실행에서 **Rust 102개·Swift 128개 테스트**와 합성 CLI·네이티브 통신 시나리오, 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사를 통과했습니다(2026-10-23). CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
+위 환경의 개발자 로컬 실행에서 **Rust 102개·Swift 134개 테스트**와 합성 CLI·네이티브 통신 시나리오, 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사를 통과했습니다(2026-10-23). CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
 
 - [개발 환경·검증 명령](docs/development.md)
 - [구조와 실행 경계](docs/architecture.md)

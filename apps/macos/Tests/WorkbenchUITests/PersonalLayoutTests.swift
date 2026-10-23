@@ -523,10 +523,12 @@ struct PersonalLayoutTests {
     }
   }
 
-  @Test func movingASolePaneToAnOuterEdgeIgnoresFreshIDsAndDoesNotPersistOrAddUndo() {
-    withDefaults { defaults in
+  @Test func movingASolePaneToAnOuterEdgeIgnoresFreshIDsAndDoesNotPersistOrAddUndo() throws {
+    try withDefaults { defaults in
+      var sole = LayoutPreset.focus.configuration
+      sole.dock = DockLayout(root: .tabs(id: "sole", panes: [.diff], active: .diff))
+      defaults.set(try JSONEncoder().encode(sole), forKey: currentKey)
       let layout = LayoutPreferences(defaults: defaults)
-      layout.update { $0.dock = DockLayout(root: .tabs(id: "sole", panes: [.diff], active: .diff)) }
       let original = layout.configuration
       let bytes = defaults.data(forKey: currentKey)
       for edge in [DockEdge.left, .right, .top, .bottom] {
@@ -586,6 +588,80 @@ struct PersonalLayoutTests {
       #expect(layout.savedLayouts == original)
       #expect(defaults.data(forKey: savedKey) == bytes)
       #expect(LayoutPreferences(defaults: defaults).savedLayouts == original)
+    }
+  }
+
+  @Test func directNavigationChangesUndoTheCompletePreviousConfiguration() {
+    withDefaults { defaults in
+      let layout = LayoutPreferences(defaults: defaults)
+      let original = layout.configuration
+      #expect(!layout.canUndoDock)
+      layout.update { $0.navigation = .tracks }
+      #expect(layout.canUndoDock)
+      #expect(layout.configuration.navigation == .tracks)
+      layout.undoDock()
+      #expect(layout.configuration == original)
+      #expect(!layout.canUndoDock)
+    }
+  }
+
+  @Test func directDiffStyleChangesUndoOnceDespiteStoreSynchronization() {
+    withDefaults { defaults in
+      let layout = LayoutPreferences(defaults: defaults)
+      let original = layout.configuration
+      layout.focusPane(.diff)
+      layout.update { $0.splitDiff.toggle() }
+      #expect(layout.focusedPane == .diff)
+      #expect(layout.canUndoDock)
+      let split = layout.configuration.splitDiff
+      layout.update { $0.splitDiff = split }
+      layout.undoDock()
+      #expect(layout.configuration == original)
+      #expect(!layout.canUndoDock)
+      // The store reflecting the restored value must not recreate the undo entry.
+      layout.update { $0.splitDiff = original.splitDiff }
+      #expect(!layout.canUndoDock)
+    }
+  }
+
+  @Test func equivalentTreeUpdatesKeepStoredBytesFocusAndUndoUntouched() throws {
+    try withDefaults { defaults in
+      let original = customConfiguration()
+      let bytes = try JSONEncoder().encode(original)
+      defaults.set(bytes, forKey: currentKey)
+      let layout = LayoutPreferences(defaults: defaults)
+      layout.focusPane(.diff)
+      let equivalent = DockLayout(
+        root: .split(
+          id: "new-split", axis: .horizontal, ratio: 0.37,
+          first: .tabs(id: "new-left", panes: [.files, .branches], active: .branches),
+          second: .tabs(id: "new-right", panes: [.diff, .stash], active: .stash)))
+      #expect(equivalent != original.dock)
+      layout.update { $0.dock = equivalent }
+      #expect(layout.configuration == original)
+      #expect(layout.focusedPane == .diff)
+      #expect(!layout.canUndoDock)
+      #expect(defaults.data(forKey: currentKey) == bytes)
+    }
+  }
+
+  @Test func tabSelectionDoesNotAddUndoAndDockMovesStillAddExactlyOneStep() throws {
+    try withDefaults { defaults in
+      let original = customConfiguration()
+      defaults.set(try JSONEncoder().encode(original), forKey: currentKey)
+      let layout = LayoutPreferences(defaults: defaults)
+      layout.focusPane(.diff)
+      layout.selectPane(.files)
+      #expect(layout.focusedPane == nil)
+      #expect(layout.dockLayout.isVisible(.files))
+      #expect(!layout.canUndoDock)
+      let selected = layout.configuration
+      layout.dockPane(.stash, nextTo: .files, edge: .bottom)
+      #expect(layout.canUndoDock)
+      layout.selectPane(.diff)
+      layout.undoDock()
+      #expect(layout.configuration == selected)
+      #expect(!layout.canUndoDock)
     }
   }
 }

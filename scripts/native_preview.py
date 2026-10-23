@@ -174,7 +174,9 @@ def main():
                       personalization_verified=args.verify_personalization)
         report["renderer_provenance"] = {"path": str(renderer.resolve()), "sha256": hashlib.sha256(renderer.read_bytes()).hexdigest(),
                                          "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                                         "source_tracked_changes": subprocess.check_output(["git", "diff", "--name-only"], cwd=ROOT, text=True).splitlines()}
+                                         "source_tracked_changes": subprocess.check_output(["git", "diff", "HEAD", "--name-only"], cwd=ROOT, text=True).splitlines(),
+                                         "source_untracked_build_inputs": subprocess.check_output(["git", "ls-files", "--others", "--", "apps/macos/Sources", "crates", ".cargo"], cwd=ROOT, text=True).splitlines(),
+                                         "scope": "Renderer hash and current source metadata; this does not attest which sources built an externally supplied --renderer."}
         forwarded_keys = ["WORKBENCH_PREVIEW_VERIFY_PERSONALIZATION", "WORKBENCH_PREVIEW_FOCUS_PANE", "WORKBENCH_PREVIEW_CODE_SIZE",
                           "WORKBENCH_PREVIEW_COMPACT", "WORKBENCH_PREVIEW_LAYOUT_SETTINGS_SECTION", "WORKBENCH_PREVIEW_PERSONALIZATION_REPORT"]
         report["personalization_environment"] = {key: environment[key] for key in forwarded_keys}

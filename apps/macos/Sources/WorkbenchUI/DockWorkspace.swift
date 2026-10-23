@@ -106,7 +106,7 @@ struct DockWorkspace: View {
         .onReceive(
           NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
         ) { _ in drag.cancel() }
-    }
+    }.background(DockFocusResponderReset(focusedPane: layout.focusedPane))
   }
 }
 
@@ -411,24 +411,28 @@ private struct DockSplit<First: View, Second: View>: View {
         HStack(spacing: 0) {
           first().frame(width: max(0, length)).clipped()
             .opacity(firstPresented ? 1 : 0).accessibilityHidden(!firstPresented)
+            .disabled(!firstPresented)
             .allowsHitTesting(firstPresented)
           divider(sizing: sizing).frame(width: dividerLength)
             .opacity(showsDivider ? 1 : 0).accessibilityHidden(!showsDivider)
             .allowsHitTesting(showsDivider)
           second().frame(width: max(0, secondLength)).clipped()
             .opacity(secondPresented ? 1 : 0).accessibilityHidden(!secondPresented)
+            .disabled(!secondPresented)
             .allowsHitTesting(secondPresented)
         }
       } else {
         VStack(spacing: 0) {
           first().frame(height: max(0, length)).clipped()
             .opacity(firstPresented ? 1 : 0).accessibilityHidden(!firstPresented)
+            .disabled(!firstPresented)
             .allowsHitTesting(firstPresented)
           divider(sizing: sizing).frame(height: dividerLength)
             .opacity(showsDivider ? 1 : 0).accessibilityHidden(!showsDivider)
             .allowsHitTesting(showsDivider)
           second().frame(height: max(0, secondLength)).clipped()
             .opacity(secondPresented ? 1 : 0).accessibilityHidden(!secondPresented)
+            .disabled(!secondPresented)
             .allowsHitTesting(secondPresented)
         }
       }
