@@ -93,6 +93,7 @@ public struct WorkbenchRoot: View {
     .onAppear { store.splitDiff = layout.configuration.splitDiff }
     .onChange(of: layout.configuration.splitDiff) { _, value in store.splitDiff = value }
     .onChange(of: store.splitDiff) { _, value in layout.update { $0.splitDiff = value } }
+    .sheet(isPresented: $store.showCloneSheet) { CloneRepositorySheet(store: store) }
     .sheet(isPresented: $store.showTaskSheet) { NewTaskSheet(store: store).id(store.workspaceSession) }
     .sheet(isPresented: $store.showBranches) {
       BranchesView(store: store) { store.showBranches = false }

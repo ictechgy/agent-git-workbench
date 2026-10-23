@@ -633,7 +633,9 @@ dependencies = [
  "anyhow",
  "schemars",
  "serde_json",
+ "tempfile",
  "workbench-domain",
+ "workbench-git",
  "workbench-service",
 ]
 

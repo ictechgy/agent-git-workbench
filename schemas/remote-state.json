@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RemoteState",
+  "type": "object",
+  "properties": {
+    "ahead": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "behind": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "branch": {
+      "description": "Full local branch reference, or None for detached/unborn state.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "clean": {
+      "type": "boolean"
+    },
+    "head": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remotes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RemoteInfo"
+      }
+    },
+    "repository_path": {
+      "type": "string"
+    },
+    "state_hash": {
+      "type": "string"
+    },
+    "upstream_branch": {
+      "description": "Short remote branch name, without refs/heads/.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "upstream_remote": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "state_hash",
+    "repository_path",
+    "clean",
+    "remotes"
+  ],
+  "$defs": {
+    "RemoteBranch": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "oid": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "oid"
+      ]
+    },
+    "RemoteInfo": {
+      "type": "object",
+      "properties": {
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemoteBranch"
+          }
+        },
+        "fetch_url": {
+          "description": "Display-safe URLs; credentials and control characters must never be returned.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "push_url": {
+          "type": "string"
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "fetch_url",
+        "push_url",
+        "supported",
+        "branches"
+      ]
+    }
+  }
+}

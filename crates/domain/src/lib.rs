@@ -8,6 +8,8 @@ use std::{
 };
 mod task_context;
 pub use task_context::*;
+mod remotes;
+pub use remotes::*;
 
 pub type ResolvedPolicy = (String, Policy, BTreeMap<String, String>);
 

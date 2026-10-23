@@ -4,6 +4,7 @@ import Foundation
 public struct ServiceFailure: Decodable, Error, LocalizedError, Sendable {
   public let code: String
   public let message: String
+  public init(code: String, message: String) { self.code = code; self.message = message }
   public var errorDescription: String? { "\(code): \(message)" }
 }
 public enum TransportFailure: Error, LocalizedError, Sendable {
@@ -34,10 +35,12 @@ public actor ServiceClient {
   public let socketPath: String
   private let timeoutSeconds: Int
   private let mutationTimeoutSeconds: Int
-  public init(socketPath: String, timeoutSeconds: Int = 30, mutationTimeoutSeconds: Int = 180) {
+  private let remoteTimeoutSeconds: Int
+  public init(socketPath: String, timeoutSeconds: Int = 30, mutationTimeoutSeconds: Int = 180, remoteTimeoutSeconds: Int = 360) {
     self.socketPath = socketPath
     self.timeoutSeconds = min(30, max(1, timeoutSeconds))
     self.mutationTimeoutSeconds = min(180, max(1, mutationTimeoutSeconds))
+    self.remoteTimeoutSeconds = min(360, max(1, remoteTimeoutSeconds))
   }
 
   public func call<T: Decodable & Sendable>(
@@ -45,7 +48,8 @@ public actor ServiceClient {
   ) async throws -> T {
     let request = try JSONEncoder().encode(ServiceRequest(method: method, params: params))
     let path = socketPath
-    let timeout = ["stage_hunk", "commit"].contains(method) ? mutationTimeoutSeconds : timeoutSeconds
+    let timeout = ["configure_remote", "fetch_remote", "pull_remote", "push_remote"].contains(method)
+      ? remoteTimeoutSeconds : (["stage_hunk", "commit"].contains(method) ? mutationTimeoutSeconds : timeoutSeconds)
     let cancellation = SocketCancellation()
     let response: Data = try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in

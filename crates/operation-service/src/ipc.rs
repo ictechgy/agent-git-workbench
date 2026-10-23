@@ -150,7 +150,12 @@ impl Write for DeadlineWriter<'_> {
 }
 pub fn call(socket: &Path, request: &Request) -> Result<Response> {
     let mut stream = UnixStream::connect(socket).context("service_unavailable")?;
-    let timeout = if matches!(request.method.as_str(), "stage_hunk" | "commit") {
+    let timeout = if matches!(
+        request.method.as_str(),
+        "configure_remote" | "fetch_remote" | "pull_remote" | "push_remote"
+    ) {
+        360
+    } else if matches!(request.method.as_str(), "stage_hunk" | "commit") {
         180
     } else {
         30

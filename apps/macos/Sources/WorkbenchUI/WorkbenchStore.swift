@@ -80,6 +80,16 @@ public final class WorkbenchStore: ObservableObject {
   @Published public var showTaskSheet = false
   public var recoveryTaskID: String?
   @Published public var showBranches = false
+  @Published public var showCloneSheet = false
+  @Published public private(set) var remoteState: RemoteState?
+  @Published public private(set) var remoteLoading = false
+  @Published public private(set) var remoteError: String?
+  @Published public private(set) var remoteMessage: String?
+  @Published private var remoteMutations: Set<RemoteScope> = []
+  private var remoteReadID = UUID()
+  private var remoteScope: RemoteScope?
+  private var remoteSnapshot: String?
+
   public private(set) var lastUpdated: Date?
   @Published public private(set) var validatingSelection = false
   @Published public var onlyUnreviewedFiles = false
@@ -384,7 +394,7 @@ public final class WorkbenchStore: ObservableObject {
   }
   public var canEdit: Bool {
     !isViewingStash && repository != nil && repository?.conflict != true && !busy
-      && !hasRunningOperation && !validatingSelection && !taskPreparationIncomplete && !contextWorking
+      && !hasRunningOperation && !remoteBusy && !validatingSelection && !taskPreparationIncomplete && !contextWorking
       && socketPath == connectedSocketPath
   }
   public func preparationEligibility(for id: String) -> PreparationEligibility {
@@ -438,6 +448,7 @@ public final class WorkbenchStore: ObservableObject {
     let restoredSelection = restoring ? selection : workspaceSelections[workspaceKey]
     let restoredContext = restoring ? contextOperationID : workspaceContexts[workspaceKey]
     restoredWorkspaceSelection = restoredSelection != nil
+    invalidateRemoteContext()
     self.client = candidate
     self.workspace = workspace
     currentWorkspace = recent ?? (restoring ? currentWorkspace : nil)
@@ -502,6 +513,7 @@ public final class WorkbenchStore: ObservableObject {
       Task { await taskContext.refresh() }
       return
     }
+    invalidateRemoteContext()
     clearDiffFailure()
     selectionCheckFailed = false
     lastRefreshFailure = nil
@@ -998,9 +1010,11 @@ public final class WorkbenchStore: ObservableObject {
 }
 
 enum UIError: LocalizedError {
-  case emptyWorkspace, notConnected, operationIdentityMismatch, workspaceChanged, workspaceChangedAfterSubmission, submissionOutcomeUnknown, planInvalidated
+  case staleRemote, remoteOutcomeUnknown, emptyWorkspace, notConnected, operationIdentityMismatch, workspaceChanged, workspaceChangedAfterSubmission, submissionOutcomeUnknown, planInvalidated
   var errorDescription: String? {
     switch self {
+    case .staleRemote: "저장소나 원격 정보가 바뀌었습니다. 원격 정보를 새로 읽고 다시 확인해 주세요."
+    case .remoteOutcomeUnknown: "원격 작업의 완료 여부를 확인하지 못했습니다. 같은 요청을 반복하기 전에 이 프로젝트의 Git 상태와 서버의 브랜치를 확인해 주세요."
     case .emptyWorkspace: "등록된 워크스페이스가 없습니다."
     case .notConnected: "로컬 서비스에 먼저 연결하세요."
     case .operationIdentityMismatch: "선택한 작업과 다른 정보가 반환되었습니다. 새로고침해 주세요."
@@ -1008,6 +1022,146 @@ enum UIError: LocalizedError {
     case .workspaceChangedAfterSubmission: "프로젝트가 바뀌었습니다. 이전 요청의 실행 여부는 이전 프로젝트의 작업 목록에서 확인해 주세요."
     case .submissionOutcomeUnknown: "작업 준비 요청의 접수 여부를 확인하지 못했습니다. 같은 요청을 반복하기 전에 이 프로젝트의 작업 목록과 실제 Git 상태를 확인해 주세요."
     case .planInvalidated: "다시 연결하여 이전 계획을 사용할 수 없습니다. 입력은 유지했습니다. 현재 상태로 계획을 다시 확인해 주세요."
+    }
+  }
+}
+
+fileprivate struct RemoteScope: Hashable, Sendable {
+  let session: UUID
+  let connection: UUID
+  let socket: String
+  let location: WorktreeSelection
+}
+public enum RemoteAction: String, Sendable {
+  case fetch = "fetch_remote", pull = "pull_remote", push = "push_remote", configure = "configure_remote"
+  public var label: String {
+    switch self { case .fetch: "Fetch"; case .pull: "Pull"; case .push: "Push"; case .configure: "원격 설정" }
+  }
+}
+public struct RemoteActionPlan: Identifiable, Sendable {
+  public let id: UUID
+  public let action: RemoteAction
+  public let repositoryID: String
+  public let repositoryPath: String
+  public let localBranch: String?
+  public let remote: String
+  public let url: String
+  public let branch: String
+  public let stateHash: String
+  fileprivate let snapshot: String?
+  fileprivate let scope: RemoteScope
+  fileprivate let title: String
+}
+
+extension WorkbenchStore {
+  private var currentRemoteScope: RemoteScope? {
+    guard client != nil, let selection, let socket = connectedSocketPath, socketPath == socket else { return nil }
+    return RemoteScope(session: workspaceSession, connection: planSession, socket: socket, location: selection)
+  }
+  public var remoteBusy: Bool { currentRemoteScope.map { remoteMutations.contains($0) } ?? false }
+  public var canUseRemotes: Bool {
+    !busy && !validatingSelection && !taskPreparationIncomplete && !hasRunningOperation
+      && currentRemoteScope != nil && repository != nil
+  }
+  private func invalidateRemoteContext() {
+    remoteReadID = UUID(); remoteState = nil; remoteScope = nil; remoteSnapshot = nil
+    remoteLoading = false; remoteError = nil; remoteMessage = nil
+  }
+  public func loadRemoteState() async {
+    guard let client, let scope = currentRemoteScope else { return }
+    let request = UUID(); remoteReadID = request
+    remoteLoading = true; remoteError = nil
+    let snapshot = repository?.snapshotHash
+    defer { if remoteReadID == request { remoteLoading = false } }
+    do {
+      let state: RemoteState = try await client.call("get_remote_state", params: params(for: scope.location))
+      guard request == remoteReadID, currentRemoteScope == scope, self.client === client,
+        snapshot == repository?.snapshotHash else { return }
+      remoteState = state; remoteScope = scope; remoteSnapshot = snapshot
+    } catch {
+      guard request == remoteReadID, currentRemoteScope == scope else { return }
+      remoteState = nil; remoteScope = nil; remoteError = UserFacingFailure.message(error)
+    }
+  }
+  public func remotePlan(_ action: RemoteAction, remote name: String, branch: String = "") throws -> RemoteActionPlan {
+    guard canUseRemotes, !remoteBusy, !remoteLoading, let scope = currentRemoteScope,
+      scope == remoteScope, let state = remoteState, remoteSnapshot == repository?.snapshotHash
+    else { throw UIError.staleRemote }
+    let remote = state.remotes.first { $0.name == name }
+    if action != .configure {
+      guard let remote, remote.supported else { throw UIError.staleRemote }
+    }
+    if action == .pull || action == .push {
+      guard state.branch != nil, state.head != nil, !branch.isEmpty else { throw UIError.staleRemote }
+    }
+    return RemoteActionPlan(id: UUID(), action: action, repositoryID: scope.location.repoId,
+      repositoryPath: state.repositoryPath, localBranch: state.branchName, remote: name,
+      url: action == .push ? (remote?.pushUrl ?? "") : (remote?.fetchUrl ?? ""), branch: branch,
+      stateHash: state.stateHash, snapshot: remoteSnapshot, scope: scope, title: workspaceTitle)
+  }
+  public func executeRemote(_ plan: RemoteActionPlan, configuration: String? = nil,
+                            url: String? = nil, pushURL: String? = nil) async throws {
+    guard let client, currentRemoteScope == plan.scope, remoteScope == plan.scope,
+      canUseRemotes, !remoteBusy, remoteState?.stateHash == plan.stateHash,
+      repository?.snapshotHash == plan.snapshot else { throw UIError.staleRemote }
+    var values = params(for: plan.scope.location)
+    values["expected_state_hash"] = .string(plan.stateHash)
+    if plan.action == .configure {
+      guard let configuration, ["add", "update", "remove"].contains(configuration) else { throw UIError.staleRemote }
+      values["action"] = .string(configuration); values["name"] = .string(plan.remote)
+      if let url { values["url"] = .string(url.trimmingCharacters(in: .whitespacesAndNewlines)) }
+      if let pushURL, !pushURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        values["push_url"] = .string(pushURL.trimmingCharacters(in: .whitespacesAndNewlines))
+      }
+    } else {
+      values["remote"] = .string(plan.remote)
+      if plan.action == .pull || plan.action == .push { values["branch"] = .string(plan.branch) }
+    }
+    remoteMutations.insert(plan.scope); remoteError = nil; remoteMessage = nil
+    defer { remoteMutations.remove(plan.scope) }
+    let result: RemoteMutationResult
+    do {
+      result = try await client.call(plan.action.rawValue, params: values)
+    } catch {
+      let service = error as? ServiceFailure
+      let unknown = service == nil || ["write_outcome_unknown", "git_write_outcome_unknown", "remote_outcome_unknown"].contains(service?.code ?? "")
+      if unknown {
+        let warning = TaskSubmissionWarning(id: plan.scope.socket + ":remote:" + plan.id.uuidString,
+          workspaceTitle: plan.title, workspacePath: plan.repositoryPath,
+          message: "\(plan.action.label) · \(plan.remote) / \(plan.branch)\n\(UIError.remoteOutcomeUnknown.localizedDescription)")
+        submissionWarnings.append(warning)
+      }
+      if currentRemoteScope == plan.scope {
+        remoteState = nil; remoteScope = nil
+        remoteError = unknown ? UIError.remoteOutcomeUnknown.localizedDescription : UserFacingFailure.message(error)
+      }
+      throw unknown ? UIError.remoteOutcomeUnknown : error
+    }
+    // The result belongs to the captured folder, even when navigation changed during the request.
+    guard currentRemoteScope == plan.scope, self.client === client else { return }
+    remoteState = result.state; remoteScope = result.state == nil ? nil : plan.scope
+    remoteSnapshot = repository?.snapshotHash
+    remoteMessage = result.message + (result.refreshRequired ? " 원격 정보를 새로고침해 주세요." : "")
+    // Git success is already established. Optional display refresh cannot relabel it as a failed write.
+    await refresh(forceDiff: true)
+    guard currentRemoteScope == plan.scope else { return }
+    await loadRemoteState()
+  }
+  public func cloneRepository(url: String, destination: URL) async throws {
+    guard !busy else { throw UIError.staleRemote }
+    busy = true; startupMessage = "저장소 복제 중…"
+    defer { busy = false; startupMessage = nil }
+    do {
+      let session = try await runtime.cloneRepository(url: url, destination: destination)
+      do { try await connectToService(socket: session.socketPath, recent: session.recent) }
+      catch { throw StartupFailure.cloneCreated(session.recent.repositoryPath) }
+      recentWorkspaces = try await runtime.recentWorkspaces()
+    } catch {
+      if case StartupFailure.cloneOutcomeUnknown(let path) = error {
+        submissionWarnings.append(TaskSubmissionWarning(id: "clone:" + UUID().uuidString,
+          workspaceTitle: destination.lastPathComponent, workspacePath: path, message: error.localizedDescription))
+      }
+      throw error
     }
   }
 }

@@ -23,6 +23,7 @@ struct RepositoryTabs: View {
       }.frame(minWidth: 150, maxWidth: .infinity)
       RepositoryBranchContext(store: store).frame(maxWidth: 210)
       CurrentFolderContext(store: store).frame(maxWidth: 350)
+      RemoteControl(store: store)
       if let op = store.contextOperation {
         if op.canMaterialize && !op.requiresNewPlan {
           Button("워크트리 준비") { Task { await store.operate("materialize", op: op) } }

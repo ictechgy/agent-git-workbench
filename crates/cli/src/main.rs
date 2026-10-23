@@ -18,6 +18,10 @@ fn main() {
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("clone") if args.len() == 3 => {
+            let path = workbench_git::remotes::clone_repository(&args[1], Path::new(&args[2]))?;
+            println!("{}", serde_json::json!({"path":path}));
+        }
         Some("inspect") if args.len() == 2 => {
             println!(
                 "{}",
@@ -91,9 +95,14 @@ fn run() -> Result<()> {
             );
             schema!("ios-version-inputs", workbench_domain::IosInputs);
             schema!("task-context", workbench_domain::TaskContextBundle);
+            schema!("remote-state", workbench_domain::RemoteState);
+            schema!(
+                "remote-mutation-result",
+                workbench_domain::RemoteMutationResult
+            );
         }
         Some("help") | Some("--help") | None => println!(
-            "workbench inspect REPOSITORY\nworkbench workspace REPOSITORY NEW_CONFIG\nworkbench fixture NEW_DIRECTORY\nworkbench trust CONFIG RECIPE_ID\nworkbench serve CONFIG JOURNAL SOCKET\nworkbench rpc SOCKET [REQUEST_FILE]  # otherwise stdin\nworkbench schemas DIRECTORY"
+            "workbench inspect REPOSITORY\nworkbench clone URL NEW_DIRECTORY\nworkbench workspace REPOSITORY NEW_CONFIG\nworkbench fixture NEW_DIRECTORY\nworkbench trust CONFIG RECIPE_ID\nworkbench serve CONFIG JOURNAL SOCKET\nworkbench rpc SOCKET [REQUEST_FILE]  # otherwise stdin\nworkbench schemas DIRECTORY"
         ),
         _ => bail!("invalid_arguments: run workbench --help"),
     }

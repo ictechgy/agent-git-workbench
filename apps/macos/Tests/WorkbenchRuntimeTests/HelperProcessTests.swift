@@ -198,3 +198,54 @@ import Testing
   } catch StartupFailure.startupTimedOut {}
   #expect(ContinuousClock.now - start < .seconds(2))
 }
+
+@Test func cloneHelperUsesExactArgumentsAndPreservesCompletedCloneOnRegistrationFailure() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-clone-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder) }
+  let destination = folder.appendingPathComponent("new project")
+  let log = folder.appendingPathComponent("args.json")
+  let helper = folder.appendingPathComponent("helper")
+  let script = """
+  #!/usr/bin/python3
+  import sys,json,os,pathlib
+  if sys.argv[1]=='clone':
+      pathlib.Path('\(log.path)').write_text(json.dumps({'args':sys.argv[1:],'env':dict(os.environ)}))
+      pathlib.Path(sys.argv[3]).mkdir()
+      pathlib.Path(sys.argv[3],'saved').write_text('completed clone')
+      print(json.dumps({'path':sys.argv[3]}));sys.exit(0)
+  print('synthetic inspect failure',file=sys.stderr);sys.exit(7)
+  """
+  try Data(script.utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+  let storage = folder.appendingPathComponent("storage")
+  let runtime = WorkspaceRuntime(storageDirectory: storage, helperURL: helper)
+  do { _ = try await runtime.cloneRepository(url: "git@gitlab.example:team/repo.git", destination: destination); Issue.record("Expected registration failure") }
+  catch StartupFailure.cloneCreated(let path) { #expect(path == destination.path) }
+  let invocation = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: log)) as? [String: Any])
+  #expect(invocation["args"] as? [String] == ["clone", "git@gitlab.example:team/repo.git", destination.path])
+  let environment = try #require(invocation["env"] as? [String: String])
+  #expect(environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin")
+  #expect(environment["SSH_AUTH_SOCK"] == ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"])
+  #expect(environment["GIT_SSH_COMMAND"] == nil)
+  #expect(try String(contentsOf: destination.appendingPathComponent("saved"), encoding: .utf8) == "completed clone")
+  #expect(try await runtime.recentWorkspaces().isEmpty)
+}
+
+@Test func cloneHelperFailureDoesNotRegisterOrRemoveExistingDestination() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-clone-fail-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder) }
+  let destination = folder.appendingPathComponent("existing")
+  try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+  try Data("keep".utf8).write(to: destination.appendingPathComponent("existing.txt"))
+  let helper = folder.appendingPathComponent("helper")
+  try Data("#!/bin/sh\nprintf '%s' 'clone_destination_exists' >&2\nexit 2\n".utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+  let storage = folder.appendingPathComponent("storage")
+  let runtime = WorkspaceRuntime(storageDirectory: storage, helperURL: helper)
+  do { _ = try await runtime.cloneRepository(url: "https://gitlab.example/team/repo.git", destination: destination); Issue.record("Expected clone failure") }
+  catch StartupFailure.cloneOutcomeUnknown {}
+  #expect(try String(contentsOf: destination.appendingPathComponent("existing.txt"), encoding: .utf8) == "keep")
+  #expect(!FileManager.default.fileExists(atPath: storage.path))
+}

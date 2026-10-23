@@ -11,4 +11,7 @@ anyhow.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 workbench-domain = { path = "../domain" }
+workbench-git = { path = "../git-adapter" }
 workbench-service = { path = "../operation-service" }
+[dev-dependencies]
+tempfile.workspace = true

@@ -804,6 +804,240 @@ struct Fixture {
     service: Arc<Service>,
     home: std::path::PathBuf,
 }
+
+#[test]
+fn remote_configuration_is_provider_neutral_and_bound_to_the_reviewed_state() {
+    let f = Fixture::new();
+    let source = &f.workspace.repo("ios-app").unwrap().path;
+    let before = git::snapshot(source).unwrap();
+    let initial = f.rpc("get_remote_state", json!({"repo_id":"ios-app"}));
+    assert_eq!(initial["repository_path"], source.to_str().unwrap());
+    assert!(initial["remotes"].as_array().unwrap().is_empty());
+    let added = f.rpc(
+        "configure_remote",
+        json!({"repo_id":"ios-app", "expected_state_hash":initial["state_hash"],
+        "action":"add", "name":"company", "url":"https://gitlab.example.test/group/project.git",
+        "push_url":"git@bitbucket.example.test:team/project.git"}),
+    );
+    assert_eq!(added["refresh_required"], false);
+    let remote = &added["state"]["remotes"][0];
+    assert_eq!(remote["name"], "company");
+    assert_eq!(
+        remote["fetch_url"],
+        "https://gitlab.example.test/group/project.git"
+    );
+    assert_eq!(
+        remote["push_url"],
+        "git@bitbucket.example.test:team/project.git"
+    );
+    assert_eq!(remote["supported"], true);
+    let rejected = f.service.dispatch(Request {
+        method: "configure_remote".into(),
+        params: json!({"repo_id":"ios-app", "expected_state_hash":initial["state_hash"],
+            "action":"remove", "name":"company"}),
+    });
+    assert_eq!(rejected.error.unwrap().code, "stale_remote_state");
+    let updated = f.rpc(
+        "configure_remote",
+        json!({"repo_id":"ios-app", "expected_state_hash":added["state"]["state_hash"],
+        "action":"update", "name":"company", "url":"ssh://git@git.example.test/team/project.git"}),
+    );
+    assert_eq!(
+        updated["state"]["remotes"][0]["fetch_url"],
+        "ssh://git@git.example.test/team/project.git"
+    );
+    let removed = f.rpc(
+        "configure_remote",
+        json!({"repo_id":"ios-app", "expected_state_hash":updated["state"]["state_hash"],
+        "action":"remove", "name":"company"}),
+    );
+    assert!(removed["state"]["remotes"].as_array().unwrap().is_empty());
+    assert_eq!(before, git::snapshot(source).unwrap());
+}
+
+#[test]
+fn remote_endpoint_drift_rejects_every_network_action_before_transport() {
+    let f = Fixture::new();
+    let source = &f.workspace.repo("ios-app").unwrap().path;
+    git::git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://gitlab.example.test/team/first.git",
+        ],
+    )
+    .unwrap();
+    let reviewed = f.rpc("get_remote_state", json!({"repo_id":"ios-app"}));
+    git::git(
+        source,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://gitlab.example.test/team/changed.git",
+        ],
+    )
+    .unwrap();
+    let before = git::snapshot(source).unwrap();
+    for method in ["fetch_remote", "pull_remote", "push_remote"] {
+        let mut params = json!({"repo_id":"ios-app", "expected_state_hash":reviewed["state_hash"], "remote":"origin"});
+        if method != "fetch_remote" {
+            params["branch"] = json!("main");
+        }
+        let response = f.service.dispatch(Request {
+            method: method.into(),
+            params,
+        });
+        assert_eq!(
+            response.error.unwrap().code,
+            "stale_remote_state",
+            "{method}"
+        );
+    }
+    assert_eq!(before, git::snapshot(source).unwrap());
+    assert_eq!(
+        git::git(source, &["remote", "get-url", "origin"])
+            .unwrap()
+            .trim(),
+        "https://gitlab.example.test/team/changed.git"
+    );
+}
+
+#[test]
+fn remote_requests_strictly_validate_parameters_without_scope_fallback() {
+    let f = Fixture::new();
+    let source = &f.workspace.repo("ios-app").unwrap().path;
+    let initial = f.rpc("get_remote_state", json!({"repo_id":"ios-app"}));
+    let configure = json!({"repo_id":"ios-app", "expected_state_hash":initial["state_hash"],
+        "action":"add", "name":"origin", "url":"https://git.example.test/team/project.git"});
+    let network = json!({"repo_id":"ios-app", "expected_state_hash":initial["state_hash"], "remote":"origin"});
+    for (method, base) in [
+        ("get_remote_state", json!({"repo_id":"ios-app"})),
+        ("configure_remote", configure.clone()),
+        ("fetch_remote", network.clone()),
+        ("pull_remote", {
+            let mut p = network.clone();
+            p["branch"] = json!("main");
+            p
+        }),
+        ("push_remote", {
+            let mut p = network.clone();
+            p["branch"] = json!("main");
+            p
+        }),
+    ] {
+        for malformed in [
+            json!(false),
+            json!(0),
+            json!([]),
+            json!({}),
+            json!(""),
+            json!(" \t"),
+        ] {
+            let mut params = base.clone();
+            params["op_id"] = malformed;
+            let result = f.service.dispatch(Request {
+                method: method.into(),
+                params,
+            });
+            assert_eq!(result.error.unwrap().code, "invalid_parameter", "{method}");
+        }
+        let mut params = base;
+        params["opid"] = json!("typo");
+        let result = f.service.dispatch(Request {
+            method: method.into(),
+            params,
+        });
+        assert_eq!(result.error.unwrap().code, "invalid_parameter", "{method}");
+    }
+    for params in [
+        {
+            let mut p = configure.clone();
+            p["expected_state_hash"] = json!("wrong");
+            p
+        },
+        {
+            let mut p = configure.clone();
+            p["action"] = json!("rename");
+            p
+        },
+        {
+            let mut p = configure.clone();
+            p["url"] = Value::Null;
+            p
+        },
+        {
+            let mut p = configure.clone();
+            p["action"] = json!("remove");
+            p
+        },
+        {
+            let mut p = configure.clone();
+            p["name"] = json!("a".repeat(201));
+            p
+        },
+    ] {
+        let response = f.service.dispatch(Request {
+            method: "configure_remote".into(),
+            params,
+        });
+        assert_eq!(response.error.unwrap().code, "invalid_parameter");
+    }
+    assert!(git::git(source, &["remote"]).unwrap().trim().is_empty());
+}
+
+#[test]
+fn remote_mutations_use_the_selected_ready_worktree_and_common_directory_lock() {
+    let f = Fixture::new();
+    let op = f.execute(Mode::Materialize, "remote-selected-folder");
+    assert_eq!(op.status, "ready");
+    let source = &f.workspace.repo("ios-app").unwrap().path;
+    let task = &op
+        .repos
+        .iter()
+        .find(|repo| repo.plan.repo_id == "ios-app")
+        .unwrap()
+        .plan
+        .worktree_path;
+    let original = f.rpc("get_remote_state", json!({"repo_id":"ios-app"}));
+    let selected = f.rpc(
+        "get_remote_state",
+        json!({"repo_id":"ios-app", "op_id":op.id}),
+    );
+    assert_eq!(selected["repository_path"], task.to_str().unwrap());
+    assert_ne!(selected["state_hash"], original["state_hash"]);
+    let mut params = json!({"repo_id":"ios-app", "op_id":op.id, "expected_state_hash":original["state_hash"],
+        "action":"add", "name":"origin", "url":"https://git.example.test/team/project.git"});
+    let stale = f.service.dispatch(Request {
+        method: "configure_remote".into(),
+        params: params.clone(),
+    });
+    assert_eq!(stale.error.unwrap().code, "stale_remote_state");
+    params["expected_state_hash"] = selected["state_hash"].clone();
+    let lock = workbench_service::repo_lock(source).unwrap();
+    let busy = f.service.dispatch(Request {
+        method: "configure_remote".into(),
+        params: params.clone(),
+    });
+    assert_eq!(busy.error.unwrap().code, "repository_busy");
+    drop(lock);
+    let snapshots = [git::snapshot(source).unwrap(), git::snapshot(task).unwrap()];
+    let success = f.rpc("configure_remote", params);
+    assert_eq!(success["state"]["repository_path"], task.to_str().unwrap());
+    assert_eq!(
+        snapshots,
+        [git::snapshot(source).unwrap(), git::snapshot(task).unwrap()]
+    );
+    let shared = f.rpc("get_remote_state", json!({"repo_id":"ios-app"}));
+    assert_eq!(shared["remotes"][0]["name"], "origin");
+    let waiting = f.execute(Mode::BranchOnly, "remote-waiting-folder");
+    let blocked = f.service.dispatch(Request {method:"configure_remote".into(),
+        params:json!({"repo_id":"ios-app", "op_id":waiting.id, "expected_state_hash":shared["state_hash"],
+            "action":"remove", "name":"origin"})});
+    assert_eq!(blocked.error.unwrap().code, "task_not_ready");
+}
 impl Fixture {
     fn new() -> Self {
         let temp = TempDir::new().unwrap();

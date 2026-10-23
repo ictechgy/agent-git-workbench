@@ -18,6 +18,7 @@ public struct WorkspaceSession: Sendable {
 public enum StartupFailure: Error, LocalizedError, Sendable {
   case engineMissing, repositoryMissing, notRepository, privateDirectory, startupTimedOut
   case helper(String)
+  case cloneCreated(String), cloneOutcomeUnknown(String), remote(String)
   case workspaceMissing
   case workspaceBusy, examplePreparationFailed, externalFilters, unsafeRepository
   public var errorDescription: String? {
@@ -28,6 +29,17 @@ public enum StartupFailure: Error, LocalizedError, Sendable {
     case .privateDirectory: "앱의 작업 폴더를 준비하지 못했습니다. 폴더 접근 권한을 확인해 주세요."
     case .startupTimedOut: "작업 준비가 지연되고 있습니다. 잠시 후 다시 열어 주세요."
     case .helper: "작업 엔진을 준비하지 못했습니다. 다시 시도해 주세요."
+    case .cloneOutcomeUnknown(let path): "복제의 완료 여부를 확인하지 못했습니다. 다시 복제하기 전에 다음 폴더와 상위 폴더의 상태를 확인해 주세요: \(path)"
+    case .remote(let code):
+      switch code {
+      case "clone_destination_exists": "같은 이름의 폴더가 이미 있습니다. 다른 이름을 입력해 주세요."
+      case "invalid_clone_destination": "복제할 상위 폴더와 새 폴더 이름을 확인해 주세요."
+      case "invalid_remote_url", "unsupported_remote_transport": "SSH 또는 HTTPS 저장소 URL을 입력해 주세요. URL에 비밀번호나 토큰을 넣지 마세요."
+      case "remote_connection_failed": "원격 서버에 연결하지 못했습니다. URL과 접근 권한을 확인해 주세요. SSH는 기본 키·agent·신뢰한 서버를, HTTPS는 macOS Git Keychain 인증을 사용합니다."
+      case "clone_staging_failed": "복제용 임시 폴더를 만들지 못했습니다. 상위 폴더의 쓰기 권한을 확인해 주세요."
+      default: "현재 Git 연결 설정을 지원하지 않습니다. URL 재작성, 사용자 지정 전송 명령, 외부 필터와 인증 도우미 설정을 확인해 주세요."
+      }
+    case .cloneCreated(let path): "복제는 완료했습니다. 프로젝트를 여는 데 실패했습니다. ‘저장소 열기’에서 다음 폴더를 선택해 주세요: \(path)"
     case .workspaceMissing: "이 작업의 기록을 찾을 수 없습니다. 저장소를 다시 열어 주세요."
     case .workspaceBusy: "다른 창에서 작업 엔진을 정리 중입니다. 잠시 후 다시 열어 주세요."
     case .examplePreparationFailed: "예제 준비를 완료하지 못했습니다. 예제를 다시 열어 주세요."
@@ -86,6 +98,21 @@ public actor WorkspaceRuntime {
     return try await coalesce("repository:\(info.path)") {
       try await self.openInspectedRepository(info)
     }
+  }
+  public func cloneRepository(url: String, destination: URL) async throws -> WorkspaceSession {
+    struct CloneResult: Decodable { let path: String }
+    let result: CloneResult
+    do {
+      let data = try await runHelper(["clone", url, destination.path], timeout: 360)
+      result = try JSONDecoder().decode(CloneResult.self, from: data)
+    } catch StartupFailure.remote(let code) where code != "remote_outcome_unknown" {
+      throw StartupFailure.remote(code)
+    } catch StartupFailure.engineMissing { throw StartupFailure.engineMissing }
+    catch StartupFailure.externalFilters { throw StartupFailure.externalFilters }
+    catch StartupFailure.unsafeRepository { throw StartupFailure.unsafeRepository }
+    catch { throw StartupFailure.cloneOutcomeUnknown(destination.path) }
+    do { return try await openRepository(URL(fileURLWithPath: result.path, isDirectory: true)) }
+    catch { throw StartupFailure.cloneCreated(result.path) }
   }
   private func openInspectedRepository(_ info: RepositoryInfo) async throws -> WorkspaceSession {
     if let existing = try recentWorkspaces().first(where: {
@@ -431,26 +458,31 @@ public actor WorkspaceRuntime {
     return candidate
   }
   private var helperEnvironment: [String: String] {
-    [
+    var environment = [
       "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
       "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
       "LANG": "en_US.UTF-8",
     ]
+    // Authentication socket is passed deliberately; arbitrary inherited Git variables are not.
+    if let socket = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"], socket.hasPrefix("/"), !socket.contains("\0") {
+      environment["SSH_AUTH_SOCK"] = socket
+    }
+    return environment
   }
-  private func runHelper(_ arguments: [String]) async throws -> Data {
+  private func runHelper(_ arguments: [String], timeout: TimeInterval = 30) async throws -> Data {
     let executable = try helper()
     let environment = helperEnvironment
     return try await withCheckedThrowingContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
-        do { continuation.resume(returning: try Self.runProcess(executable, arguments, environment)) }
+        do { continuation.resume(returning: try Self.runProcess(executable, arguments, environment, timeout: timeout)) }
         catch { continuation.resume(throwing: error) }
       }
     }
   }
   private nonisolated static func runProcess(
-    _ executable: URL, _ arguments: [String], _ environment: [String: String]
+    _ executable: URL, _ arguments: [String], _ environment: [String: String], timeout: TimeInterval = 30
   ) throws -> Data {
-    try HelperProcess.run(executable, arguments, environment)
+    try HelperProcess.run(executable, arguments, environment, timeout: timeout)
   }
 }
 

@@ -5,7 +5,7 @@
 ## 아직 지원하지 않는 기능
 
 - Windows/Linux 네이티브 GUI.
-- fetch·pull·push 등 원격 동기화, 변경 되돌리기(discard), merge·rebase·충돌 해결 UI.
+- 제공자 OAuth·PR API, 강제 push, 변경 되돌리기(discard), merge·rebase·충돌 해결 UI. 공통 SSH/HTTPS clone·fetch·빨리 감기 pull·단일 브랜치 push는 지원합니다.
 - 일반적인 branch CRUD·checkout UI, history rewriting, 임의 행 스테이징. 브랜치 생성은 현재 Task 준비 과정에서만 지원합니다.
 - Stash 적용·삭제. 현재 Stash는 목록·파일·Diff 읽기 전용입니다.
 - GUI에서 다중 저장소·그룹·recipe·trust를 자유롭게 편집하는 기능.
@@ -14,10 +14,10 @@
 
 ## 배포·호환성
 
-- `0.1.0-alpha.1`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
+- `0.1.0-alpha.2`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
 - 선언된 최소 대상은 macOS 14이지만 실행 검증은 macOS 27.0.1에서만 했습니다. macOS 14–26에서의 호환성은 아직 검증하지 않았습니다.
 - 앱과 Rust 엔진은 함께 배포하지만 Git은 포함하지 않습니다. 런타임은 `/usr/bin:/bin:/usr/sbin:/sbin` 경로를 사용하므로 Apple Command Line Tools 또는 Xcode의 Git이 필요합니다. Homebrew 전용 경로의 Git은 사용하지 않습니다. 내장 예제의 준비 스크립트는 `python3`도 실행합니다.
-- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.1.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
+- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.2.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
 - 자동 업데이트 기능은 없습니다. 새 버전은 GitHub Releases에서 다운로드해 교체합니다.
 - 라이선스는 미확정이며 현재 Cargo 메타데이터는 `UNLICENSED`입니다.
 
@@ -29,6 +29,14 @@
 - Source-plan drift·신뢰 변경·canonical worktree 불일치는 중단 사유입니다. 자동 재계획·reset·clean·강제 삭제로 복구하지 않습니다.
 - Recipe는 OS sandbox가 아닙니다. 저장소 간 원자적 commit/rollback, process group을 벗어난 자식, 모든 비멱등 script의 안전성을 보장하지 않습니다.
 - 일반 staging·commit의 영속 mutation journal과 범용 재시도 idempotency는 후속입니다. 결과가 불명확하면 Git 상태를 확인하고 자동 반복하지 않습니다.
+
+## 원격 Git
+
+- GitHub·GitLab·Bitbucket·자체 서버에 공통 SSH/HTTPS를 사용합니다. 제공자별 로그인·토큰 입력·PR 기능은 없습니다. 인증은 기존 SSH agent·기본 키·known-host 파일 또는 Apple Git 키체인 helper에서 준비해야 합니다.
+- 사용자 SSH config·별칭·ProxyCommand·임의 identity 경로, 대화형 인증, 임의 credential helper는 사용하지 않습니다. 파일 경로·`file://`·`git://`·외부 remote helper·URL rewrite·방향별 복수 URL·partial/promisor 저장소와 보안을 바꾸는 HTTP 설정은 거부합니다.
+- Fetch는 선택 원격의 브랜치 head만 갱신·prune합니다. 태그·서브모듈 동기화는 포함하지 않습니다. Pull은 깨끗한 폴더에서 빨리 감기로만, push는 확인한 commit을 한 브랜치로만 전송합니다.
+- 원격 설정과 추적 ref는 연결된 worktree에 공유됩니다. 확인 이후 URL·로컬 상태·원격 ref가 바뀌면 재확인이 필요합니다. 응답을 잃거나 시간이 초과되면 Git과 서버 상태를 확인하기 전 재시도하지 마세요. 클라이언트를 닫아도 서버 작업 취소가 확정되는 것은 아닙니다.
+- [지원 URL·실행 경계·복구 안내](remotes.md)에서 자세한 정책을 확인하세요.
 
 ## 표시·성능 경계
 

@@ -53,6 +53,7 @@ struct RepositoryTracks<Content: View>: View {
         Spacer(minLength: 4)
         RepositoryBranchContext(store: store).frame(maxWidth: 210)
         CurrentFolderContext(store: store).frame(maxWidth: 350)
+      RemoteControl(store: store)
       } else {
         Text(repo?.errorCode == nil ? "" : "준비를 완료하지 못했습니다.")
           .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)

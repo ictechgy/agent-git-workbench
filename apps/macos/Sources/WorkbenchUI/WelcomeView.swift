@@ -52,6 +52,8 @@ struct WelcomeView: View {
                 }.padding(.horizontal, 4).frame(height: 52).contentShape(Rectangle())
               }.buttonStyle(PrimaryActionStyle())
                 .disabled(store.busy).help("Git 프로젝트 폴더 선택")
+              Button("원격 저장소 복제…", systemImage: "arrow.down.to.line") { store.showCloneSheet = true }
+                .buttonStyle(.link).disabled(store.busy)
               Button {
                 Task { await store.openExample() }
               } label: {

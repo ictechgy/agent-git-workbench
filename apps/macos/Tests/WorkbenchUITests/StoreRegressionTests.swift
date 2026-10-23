@@ -1196,3 +1196,152 @@ func reconnectCancellationMetadataDoesNotCrossWorkspaces(sameSocket: Bool) async
   #expect(store.diff?.hunks.isEmpty == true); #expect(store.diff?.text == "Binary files differ")
   #expect(replies.base.lock.withLock { replies.base.diffCalls } == before + 1)
 }
+
+private final class RemoteReplies: @unchecked Sendable {
+  let base = Replies()
+  let lock = NSLock()
+  var hash = "remote-1"
+  var failure = ""
+  var holdRead = false
+  var holdWrite = false
+  var calls: [(String, [String: Any])] = []
+  let arrived = Flag()
+  let gate = DispatchSemaphore(value: 0)
+  func state() -> [String: Any] {
+    ["state_hash": hash, "repository_path": "/tmp/synthetic", "branch": "refs/heads/main", "head": "head", "clean": true,
+     "remotes": [["name": "origin", "fetch_url": "https://gitlab.example/team/repo.git", "push_url": "https://gitlab.example/team/repo.git", "supported": true,
+                  "branches": [["name": "main", "oid": "head"]]]], "upstream_remote": "origin", "upstream_branch": "main", "ahead": 1, "behind": 0]
+  }
+  func respond(_ request: [String: Any]) -> [String: Any]? {
+    let method = request["method"] as? String ?? ""
+    guard method == "get_remote_state" || method.hasSuffix("_remote") else { return base.respond(request) }
+    let captured = lock.withLock { () -> ([String: Any], Bool, String) in
+      calls.append((method, request["params"] as? [String: Any] ?? [:]))
+      let held = method == "get_remote_state" ? holdRead : holdWrite
+      return (state(), held, failure)
+    }
+    if captured.1 { arrived.value = true; _ = gate.wait(timeout: .now() + .seconds(5)) }
+    if method == "get_remote_state" { return ["schema_version": 1, "result": captured.0] }
+    switch captured.2 {
+    case "disconnect": return nil
+    case "decode": return ["schema_version": 1, "result": ["bad": true]]
+    case "reject": return ["schema_version": 1, "error": ["code": "stale_remote_state", "message": "state changed"]]
+    case "unknown": return ["schema_version": 1, "error": ["code": "remote_outcome_unknown", "message": "connection lost"]]
+    default: return ["schema_version": 1, "result": ["state": captured.0, "refresh_required": false, "message": "Fetch 완료"]]
+    }
+  }
+  var writeCount: Int { lock.withLock { calls.filter { $0.0 != "get_remote_state" }.count } }
+}
+
+@Test @MainActor func remoteRequestsUseActualFolderScopeAndPreserveReviewDrafts() async throws {
+  let replies = RemoteReplies(); replies.base.includeTask = true; replies.base.diffFails = false
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect(); store.selectTask(try #require(store.operations.first)); try await settleSelection(store)
+  await store.loadRemoteState()
+  let taskPlan = try store.remotePlan(.fetch, remote: "origin")
+  try await store.executeRemote(taskPlan)
+  #expect(replies.lock.withLock { replies.calls.first(where: { $0.0 == "fetch_remote" })?.1["op_id"] as? String } == "op")
+  store.select(.init(repoId: "a")); try await settleSelection(store)
+  #expect(store.contextOperation != nil); #expect(store.selection?.opId == nil)
+  store.commitMessage = "retain my commit draft"
+  let file = store.selectedFile; let staged = store.staged
+  await store.loadRemoteState()
+  let originalPlan = try store.remotePlan(.fetch, remote: "origin")
+  try await store.executeRemote(originalPlan)
+  #expect(replies.lock.withLock { replies.calls.last(where: { $0.0 == "fetch_remote" })?.1["op_id"] } == nil)
+  #expect(store.commitMessage == "retain my commit draft"); #expect(store.selectedFile == file); #expect(store.staged == staged)
+  #expect(store.selection?.opId == nil); #expect(store.remoteMessage == "Fetch 완료")
+}
+
+@Test @MainActor func remoteConfirmationsCannotCrossConnectionsOrDisplayedState() async throws {
+  let replies = RemoteReplies(); let server = try TestService { replies.respond($0) }
+  let other = RemoteReplies(); let serverB = try TestService { other.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect(); await store.loadRemoteState()
+  let plan = try store.remotePlan(.push, remote: "origin", branch: "main")
+  replies.lock.withLock { replies.hash = "remote-2" }; await store.loadRemoteState()
+  do { try await store.executeRemote(plan); Issue.record("Stale remote state accepted") } catch UIError.staleRemote {}
+  #expect(replies.writeCount == 0)
+  let changed = try store.remotePlan(.push, remote: "origin", branch: "main")
+  await store.connect(); await store.loadRemoteState() // Same-workspace reconnect invalidates consent.
+  do { try await store.executeRemote(changed); Issue.record("Old connection accepted") } catch UIError.staleRemote {}
+  #expect(replies.writeCount == 0)
+  let reconnected = try store.remotePlan(.pull, remote: "origin", branch: "main")
+  store.socketPath = serverB.path; await store.connect()
+  do { try await store.executeRemote(reconnected); Issue.record("Foreign project accepted") } catch UIError.staleRemote {}
+  #expect(replies.writeCount == 0); #expect(other.writeCount == 0)
+}
+
+@Test @MainActor func lateRemoteReadsCannotPublishIntoNewWorkspace() async throws {
+  let first = RemoteReplies(); let second = RemoteReplies()
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  first.lock.withLock { first.holdRead = true }
+  let read = Task { await store.loadRemoteState() }; try await wait(first.arrived)
+  store.socketPath = serverB.path; await store.connect()
+  second.lock.withLock { second.hash = "second" }; await store.loadRemoteState()
+  first.gate.signal(); await read.value
+  #expect(store.remoteState?.stateHash == "second"); #expect(!store.remoteLoading)
+}
+
+@Test(arguments: ["disconnect", "decode", "unknown", "reject"]) @MainActor
+func remoteUnknownOutcomeIsOriginBoundAndExplicitRejectionIsKnown(failure: String) async throws {
+  let first = RemoteReplies(); first.failure = failure; first.holdWrite = true
+  let second = RemoteReplies()
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect(); await store.loadRemoteState()
+  let plan = try store.remotePlan(.push, remote: "origin", branch: "main")
+  let write = Task { try await store.executeRemote(plan) }; try await wait(first.arrived)
+  #expect(store.remoteBusy)
+  store.socketPath = serverB.path; await store.connect(); #expect(!store.remoteBusy)
+  first.gate.signal()
+  do { try await write.value; Issue.record("Failed remote write succeeded") }
+  catch { if failure == "reject" { #expect(error is ServiceFailure) } else { #expect(error is UIError) } }
+  #expect(store.remoteError == nil)
+  #expect(store.submissionWarnings.count == (failure == "reject" ? 0 : 1))
+  if let warning = store.submissionWarnings.first {
+    #expect(warning.id.hasPrefix(serverA.path)); #expect(warning.workspacePath == "/tmp/synthetic")
+    #expect(warning.message.contains("Push · origin / main"))
+  }
+  await store.refresh(); await store.loadRemoteState()
+  #expect(first.writeCount == 1); #expect(second.writeCount == 0)
+}
+
+@Test @MainActor func completedCloneWithFailedHandshakeKeepsOldWorkspaceAndShowsClonePath() async throws {
+  let replies = Replies(); let server = try TestService { replies.respond($0) }
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-clone-handshake-\(UUID().uuidString)")
+  let sockets = URL(fileURLWithPath: "/tmp/agw-clone-\(UUID().uuidString.prefix(8))")
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: sockets) }
+  let helper = folder.appendingPathComponent("helper")
+  let script = """
+  #!/usr/bin/python3
+  import sys,json,pathlib,socket,os
+  if sys.argv[1]=='clone':
+      pathlib.Path(sys.argv[3]).mkdir();print(json.dumps({'path':sys.argv[3]}));sys.exit(0)
+  if sys.argv[1]=='inspect':
+      print(json.dumps({'id':'new-repo','path':sys.argv[2]}));sys.exit(0)
+  if sys.argv[1]=='workspace':
+      pathlib.Path(sys.argv[3]).write_text('{}');sys.exit(0)
+  listener=socket.socket(socket.AF_UNIX);listener.bind(sys.argv[-1]);listener.listen(16)
+  while True:
+      peer,_=listener.accept()
+      request=json.loads(peer.makefile('rb').readline());stopping=request['method']=='shutdown_if_idle'
+      peer.sendall((json.dumps({'schema_version':1,'result':{'stopping':True} if stopping else []})+'\\n').encode());peer.close()
+      if stopping:break
+  listener.close();os.unlink(sys.argv[-1])
+  """
+  try Data(script.utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+  let runtime = WorkspaceRuntime(storageDirectory: folder.appendingPathComponent("data"), runtimeDirectory: sockets, helperURL: helper)
+  let store = WorkbenchStore(socketPath: server.path, runtime: runtime)
+  await store.connect(); let session = store.workspaceSession; let selection = store.selection
+  store.commitMessage = "keep this draft"
+  let destination = folder.appendingPathComponent("new-repo")
+  do { try await store.cloneRepository(url: "https://gitlab.example/team/repo.git", destination: destination); Issue.record("Expected final handshake failure") }
+  catch StartupFailure.cloneCreated(let path) { #expect(path == destination.path) }
+  #expect(store.workspaceSession == session); #expect(store.socketPath == server.path)
+  #expect(store.selection == selection); #expect(store.commitMessage == "keep this draft")
+  #expect(FileManager.default.fileExists(atPath: destination.path)); #expect(!store.busy)
+  #expect(store.submissionWarnings.isEmpty)
+  await runtime.stopIdleServices()
+}

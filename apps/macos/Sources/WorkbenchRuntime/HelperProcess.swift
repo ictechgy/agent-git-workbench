@@ -48,6 +48,7 @@ enum HelperProcess {
       {
         if code == "unsupported_external_filter" { throw StartupFailure.externalFilters }
         if code == "unsafe_source_repository" { throw StartupFailure.unsafeRepository }
+        if arguments.first == "clone" { throw StartupFailure.remote(code) }
       }
       throw StartupFailure.helper(String(String(decoding: err.data, as: UTF8.self).prefix(2_000)))
     }

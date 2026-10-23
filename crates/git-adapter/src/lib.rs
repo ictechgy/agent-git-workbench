@@ -2,6 +2,7 @@ mod deadline;
 mod file_hash;
 pub use deadline::{check_deadline, fresh_deadline, with_deadline};
 mod process;
+pub mod remotes;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,7 +29,7 @@ fn git_version(path: &Path) -> Result<String> {
     Ok(version)
 }
 fn git_command(path: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new("/usr/bin/git");
     cmd.current_dir(path)
         .args([
             "--no-pager",
@@ -60,7 +61,8 @@ fn git_command(path: &Path, args: &[&str]) -> Command {
     }
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_LITERAL_PATHSPECS", "1")
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1");
     cmd
 }
 pub fn command(path: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {

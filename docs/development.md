@@ -80,6 +80,7 @@ swift build --package-path apps/macos
 python3 scripts/build_macos.py
 python3 scripts/smoke.py
 python3 scripts/native_smoke.py
+python3 scripts/remote_smoke.py
 python3 scripts/startup_smoke.py
 # 별도로 만든 배포 앱의 엔진을 검사할 때:
 python3 scripts/startup_smoke.py --app /absolute/path/River.app
@@ -87,6 +88,7 @@ python3 scripts/startup_smoke.py --app /absolute/path/River.app
 
 - `smoke.py`: 실제 Unix 소켓 요청으로 branch-only → materialize → 부분 실패 → 재개를 실행하고 Git 결과를 교차 확인합니다.
 - `native_smoke.py`: 제품과 같은 Swift 클라이언트로 Rust 엔진을 호출해 준비·부분 스테이징·커밋·Stash·브랜치 조회를 검사합니다.
+- `remote_smoke.py`: 실제 CLI·소켓으로 원격 URL 관리·stale 상태·endpoint 변경·안전하지 않은 URL·대상 보존을 검사합니다. 선택적 `--public-url https://host/group/project.git`는 임시 폴더에서 해당 공개 저장소를 clone·fetch하며 서버로 push하지 않습니다.
 - `startup_smoke.py`: 패키징한 helper의 위치 이동, 연결 환경 변수 없는 시작, 재시작·다른 인스턴스·예제 재사용을 검사합니다.
 
 새 임시 저장소만 사용하며 결과를 독립 Git 명령으로 확인합니다. 이 harness는 기존 사용자 앱을 조작하는 마우스·키보드 E2E나 성능 벤치마크가 아닙니다. 일부 fixture는 실행 후 `/tmp`에 남습니다.

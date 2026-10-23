@@ -172,6 +172,8 @@ struct NativePreview {
         "Verified actual local/remote branch list, search and pinned per-branch history without folder selection changes"
       )
     }
+    let remoteMode = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_REMOTE"] == "1"
+    if remoteMode { await store.loadRemoteState() }
     let content: AnyView
     if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_LAYOUT_SETTINGS"] == "1" {
       content = AnyView(
@@ -183,7 +185,9 @@ struct NativePreview {
         WorkbenchRoot(
           store: store,
           layout: layout, dockSession: dockSession
-        ))
+        ).overlay(alignment: .topTrailing) {
+          if remoteMode { RemotePreviewOverlay(store: store).padding(.top, 100).padding(.trailing, 16) }
+        })
     }
     let view = NSHostingView(
       rootView:

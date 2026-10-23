@@ -1,6 +1,7 @@
 pub mod fixtures;
 pub mod ipc;
 pub mod registration;
+mod remotes;
 mod task_context;
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
@@ -849,8 +850,19 @@ impl Service {
     pub fn dispatch(self: &Arc<Self>, request: Request) -> Response {
         // Worker threads have their own preparation budgets; interactive calls
         // must stop spending Git time before the native client's 30s timeout.
-        let result =
-            git::with_deadline(std::time::Duration::from_secs(25), || self.handle(request));
+        let timeout = if matches!(
+            request.method.as_str(),
+            "configure_remote" | "fetch_remote" | "pull_remote" | "push_remote"
+        ) {
+            // Network operations have a separate bounded budget. Leave time to
+            // serialize the response before the client's 360 second deadline.
+            345
+        } else {
+            25
+        };
+        let result = git::with_deadline(std::time::Duration::from_secs(timeout), || {
+            self.handle(request)
+        });
         match result {
             Ok(value) => Response {
                 schema_version: 1,
@@ -879,6 +891,9 @@ impl Service {
                 .ok_or_else(|| anyhow::anyhow!("missing_parameter: {key}"))
         };
         match request.method.as_str() {
+            "get_remote_state" | "configure_remote" | "fetch_remote" | "pull_remote" | "push_remote" => {
+                self.handle_remotes(&request.method, p)
+            }
             "get_task_context" | "save_task_context" | "run_git_check" | "record_verification_report" => {
                 optional_id(&p, "op_id")?;
                 optional_id(&p, "context_op_id")?;

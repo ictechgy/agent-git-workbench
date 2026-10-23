@@ -19,6 +19,18 @@ enum UserFacingFailure {
     }
     if let service = error as? ServiceFailure {
       switch service.code {
+      case "stale_remote_state": return "폴더나 원격 정보가 바뀌었습니다. 원격 정보를 새로 읽고 다시 확인해 주세요."
+      case "invalid_remote_url", "unsupported_remote_transport": return "SSH 또는 HTTPS 저장소 URL을 입력해 주세요. URL에 비밀번호나 토큰을 넣지 마세요."
+      case "invalid_remote_name": return "원격 이름에는 영문·숫자·하이픈·밑줄을 사용해 주세요."
+      case "invalid_remote_branch", "remote_branch_required": return "현재 로컬 브랜치와 보낼 원격 브랜치 이름을 확인해 주세요."
+      case "remote_worktree_dirty": return "현재 폴더의 변경을 커밋하거나 정리한 뒤 Pull해 주세요."
+      case "remote_pull_not_fast_forward": return "로컬과 원격 이력이 갈라져 있어 Pull하지 않았습니다. 별도로 병합하거나 rebase한 뒤 다시 확인해 주세요."
+      case "remote_push_rejected": return "서버가 Push를 거절했습니다. 원격의 새 커밋이나 브랜치 보호 규칙을 확인해 주세요."
+      case "remote_connection_failed": return "원격 서버에 연결하지 못했습니다. URL·권한과 SSH 키·서버 신뢰 또는 macOS Git Keychain 인증을 확인해 주세요."
+      case "remote_not_found", "remote_name_conflict": return "원격 이름이 없거나 이미 사용 중입니다. 원격 정보를 새로 읽고 이름을 확인해 주세요."
+      case "remote_not_local": return "이 원격은 프로젝트 밖의 Git 설정에 등록되어 있습니다. 해당 설정에서 수정해 주세요."
+      case "remote_outcome_unknown": return UIError.remoteOutcomeUnknown.localizedDescription
+      case "unsupported_remote_config", "unsupported_remote_command", "unsupported_remote_endpoints", "unsupported_url_rewrite", "unsupported_partial_clone", "unsupported_http_config", "unsupported_http_configuration", "unsupported_repository_format": return "현재 Git 연결 설정을 지원하지 않습니다. 원격 URL·URL 재작성·전송 명령·HTTP 설정을 확인해 주세요. 사용자 지정 SSH 설정은 지원하지 않습니다."
       case "unsupported_external_filter": return "Git 외부 필터가 등록되어 있습니다. 현재 버전은 실제 사용 여부와 관계없이 전역 설정을 포함한 외부 필터 환경을 지원하지 않습니다."
       case "unsafe_task_worktree", "wrong_task_branch": return "작업 폴더의 위치나 브랜치가 바뀌었습니다. 원래 폴더와 브랜치를 복구한 뒤 새로고침해 주세요."
       case "unsafe_source_repository": return "원래 저장소의 Git 위치 설정이 바뀌었습니다. 저장소 설정을 확인하고 다시 열어 주세요."

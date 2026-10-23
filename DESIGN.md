@@ -40,6 +40,7 @@
 - A preset initializes a tree; it does not constrain later placement. Save nested splits, ratios, active tabs, hidden panes, and diff style. Preserve existing saved layouts. Resizing does not silently rearrange or hide panes.
 - Stash selection is read-only and replaces the file/Diff content; explicit return restores current changes. Branch selection reads history without checkout. Both use real Git data.
 - Task information records purpose, completion criteria, references, notes, checks, and reports. App-run observations are distinct from human/AI reports. Hunk requests and handoff drafts use explicit preview/copy; the app does not invoke providers.
+- **Remote operations:** A named `원격` disclosure sits beside the current-folder context in both tab and repository-track navigation. Keep remote selection, endpoint details, fetched branches, synchronization, and URL management in that disclosure; do not add a permanent action row or pane. Clone is a secondary welcome/menu action with one sheet.
 
 ## Design principles
 
@@ -90,6 +91,7 @@
 - **Disabled:** Explain actual blockers: read-only Stash, unsupported/oversized diff, conflicts, unresolved task, unstaged work, or validation in progress. Do not imply an unavailable operation succeeded.
 - **Reconnect:** Publish a candidate workspace only after its handshake. Same-workspace reconnect preserves drafts and invalidates executable plans. Old responses cannot replace newer workspace/location state.
 - **Unknown outcome:** Keep an origin-project notice during the app session; require inspection before repeating a write. Never silently replay a mutation.
+- **Remote writes:** Pull and push confirmation identifies the actual repository, folder, local branch, remote URL, and target branch. Freeze that identity with the reviewed state; switching folders/workspaces invalidates submission. A successful push remains successful if the subsequent refresh fails. Pull uses fast-forward integration and requires a clean folder; show concrete blockers. Network progress belongs to its originating location and must not erase commit drafts or move the user's selection.
 - **Refresh:** Explicit refresh re-reads selected Diff even with unchanged content snapshots. Background polling uses the cheaper unchanged-state path and pauses while inactive.
 
 ## Content voice
@@ -106,6 +108,7 @@
 - Git writes require fresh authorization and scoped snapshots. Presentation caching never authorizes writes. Original checkout, pinned plan, recipe trust, and stale-response protections remain intact.
 - Git hooks, fsmonitor, and external signing programs are disabled; app commits are unsigned. Configured external filters are rejected. See [limitations](docs/limitations.md) rather than weakening policy for a cleaner screen.
 - Retain bounded caches, diffs, history, and IPC. Avoid unnecessary re-fetches, full-store publication, layout-triggered Git work, and parsing during pointer movement. Large-repository performance is not yet benchmarked.
+- Remote Git transport uses provider-neutral SSH/HTTPS. The first implementation uses existing SSH agent/default identities and known-host files, or the trusted macOS Git keychain helper. Provider login, arbitrary credential helpers, SSH aliases/proxies, filesystem remotes, and automatic credential prompts are outside this version. See [remote contract](docs/remotes.md) for exact boundaries.
 - Validate Swift/Rust checks, real process boundaries, and native renders with synthetic Git data. Record OS input, keyboard, VoiceOver, supported-version, and performance validation separately; a screenshot does not establish them.
 
 ## Open questions
@@ -113,4 +116,4 @@
 - [ ] Product owner: choose a license for the project. The authorized public testing alpha retains the disclosed `UNLICENSED` status; distribution does not imply that licensing is resolved.
 - [ ] QA: complete OS-level keyboard/VoiceOver testing and verify long names and dense custom layouts across supported systems.
 - [ ] Performance: measure repository switching, worktree creation against Git CLI, and idle/active memory on large repositories before making performance claims.
-- [ ] Distribution: complete Apple notarization and minimum-supported-macOS runtime validation. Developer ID-signed DMG packaging is available; see [release notes](docs/releases/v0.1.0-alpha.1.md).
+- [ ] Distribution: complete Apple notarization and minimum-supported-macOS runtime validation. Developer ID-signed DMG packaging is available; see [release notes](docs/releases/v0.1.0-alpha.2.md).
