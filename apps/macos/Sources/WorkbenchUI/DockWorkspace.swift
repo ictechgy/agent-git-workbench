@@ -336,7 +336,7 @@ private struct DockTab: View {
       }
       hovering = false
     }
-    .accessibilityElement().accessibilityLabel(
+    .accessibilityLabel(
       layout.focusedPane == nil ? "\(title) 패널 · 드래그하여 이동" : "\(title) 패널"
     )
     .accessibilityAddTraits(selected ? .isSelected : [])

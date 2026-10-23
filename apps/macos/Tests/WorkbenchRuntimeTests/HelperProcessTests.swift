@@ -153,6 +153,139 @@ import Testing
   await second.stopIdleServices()
 }
 
+private actor RecentPublicationProbe {
+  private(set) var count = 0
+  func published() { count += 1 }
+}
+
+@Test func corruptRecentReadRechecksAfterConcurrentWriterPublishes() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-recent-recovery-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700])
+  defer { try? FileManager.default.removeItem(at: folder) }
+  let history = folder.appendingPathComponent("recent.json")
+  try Data("{broken before writer".utf8).write(to: history)
+  let descriptor = Darwin.open(folder.appendingPathComponent("recent-history.lock").path,
+    O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+  guard descriptor >= 0 else { throw StartupFailure.privateDirectory }
+  defer { Darwin.close(descriptor) }
+  #expect(flock(descriptor, LOCK_EX | LOCK_NB) == 0)
+  let runtime = WorkspaceRuntime(storageDirectory: folder)
+  let probe = RecentPublicationProbe()
+  let read = Task {
+    let recents = try await runtime.recentWorkspaces()
+    await probe.published()
+    return recents
+  }
+  try await Task.sleep(for: .milliseconds(200))
+  #expect(await probe.count == 0)
+  // The current lock owner publishes a normal replacement before releasing.
+  // Recovery must re-read it rather than moving the replacement to a backup.
+  let recent = RecentWorkspace(id: UUID(), name: "Published", repositoryPath: folder.path,
+    isExample: false, lastOpened: Date())
+  let bytes = try JSONEncoder().encode([recent])
+  try bytes.write(to: history, options: .atomic)
+  #expect(flock(descriptor, LOCK_UN) == 0)
+  #expect(try await read.value == [recent])
+  #expect(try Data(contentsOf: history) == bytes)
+  #expect(try !FileManager.default.contentsOfDirectory(atPath: folder.path).contains { $0.hasPrefix("recent-corrupt-") })
+}
+
+@Test func differentRepositoryHistoryUpdatesWaitForSharedCrossProcessLock() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-history-\(UUID().uuidString)")
+  let sockets = URL(fileURLWithPath: "/tmp/agw-hist-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  let storage = folder.appendingPathComponent("data")
+  try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700])
+  let repositories = [folder.appendingPathComponent("first"), folder.appendingPathComponent("second")]
+  for repo in repositories { try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true) }
+  defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: sockets) }
+
+  // A separate process owns precisely the storage-wide lock. Both repositories
+  // must reach engine readiness without either publishing through that lock.
+  let acquired = folder.appendingPathComponent("lock-acquired")
+  let release = folder.appendingPathComponent("release-history")
+  let locker = Process()
+  locker.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+  locker.arguments = ["-c", """
+  import fcntl,pathlib,time
+  base=pathlib.Path('\(folder.path)')
+  with (base/'data/recent-history.lock').open('a') as lock:
+      fcntl.flock(lock,fcntl.LOCK_EX)
+      (base/'lock-acquired').touch()
+      deadline=time.monotonic()+15
+      while not (base/'release-history').exists():
+          if time.monotonic()>deadline:raise TimeoutError('history barrier was not released')
+          time.sleep(.01)
+  """]
+  try locker.run()
+  defer { if locker.isRunning { locker.terminate() } }
+  for _ in 0..<200 {
+    if FileManager.default.fileExists(atPath: acquired.path) { break }
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(FileManager.default.fileExists(atPath: acquired.path))
+  let helper = folder.appendingPathComponent("engine-stub")
+  let script = """
+  #!/usr/bin/python3
+  import sys,json,socket,os,pathlib
+  base=pathlib.Path('\(folder.path)')
+  if sys.argv[1]=='inspect':
+      print(json.dumps({'id':pathlib.Path(sys.argv[2]).name,'path':sys.argv[2]}));sys.exit(0)
+  if sys.argv[1]=='workspace':
+      pathlib.Path(sys.argv[-1]).write_text(json.dumps({'schema_version':1,'id':'repo','repositories':[{'id':'repo','path':sys.argv[2]}],'groups':[]}))
+      print('{}');sys.exit(0)
+  if sys.argv[1]!='serve':sys.exit(9)
+  server=socket.socket(socket.AF_UNIX);server.bind(sys.argv[-1]);server.listen(16)
+  (base/('ready-'+pathlib.Path(sys.argv[-1]).stem)).touch()
+  while True:
+      peer,_=server.accept()
+      try:
+          request=json.loads(peer.makefile('rb').readline())
+          stopping=request['method']=='shutdown_if_idle'
+          peer.sendall((json.dumps({'schema_version':1,'result':{'stopping':True} if stopping else []})+'\\n').encode())
+          if stopping:break
+      finally:peer.close()
+  server.close();os.unlink(sys.argv[-1])
+  """
+  try Data(script.utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+  let first = WorkspaceRuntime(storageDirectory: storage, runtimeDirectory: sockets, helperURL: helper)
+  let second = WorkspaceRuntime(storageDirectory: storage, runtimeDirectory: sockets, helperURL: helper)
+  let probe = RecentPublicationProbe()
+  let firstOpen = Task {
+    let session = try await first.openRepository(repositories[0])
+    await probe.published()
+    return session
+  }
+  let secondOpen = Task {
+    let session = try await second.openRepository(repositories[1])
+    await probe.published()
+    return session
+  }
+  for _ in 0..<300 {
+    if try FileManager.default.contentsOfDirectory(atPath: folder.path).filter({ $0.hasPrefix("ready-") }).count == 2 { break }
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasPrefix("ready-") }.count == 2)
+  try await Task.sleep(for: .milliseconds(200))
+  #expect(await probe.count == 0)
+  #expect(!FileManager.default.fileExists(atPath: storage.appendingPathComponent("recent.json").path))
+  try Data().write(to: release)
+  let (a, b) = try await (firstOpen.value, secondOpen.value)
+  #expect(a.recent.id != b.recent.id)
+  let history = try await first.recentWorkspaces()
+  #expect(Set(history.map(\.repositoryPath)) == Set(repositories.map(\.path)))
+  #expect(Set(history.map(\.id)) == Set([a.recent.id, b.recent.id]))
+  let workspaces = storage.appendingPathComponent("workspaces")
+  #expect(try FileManager.default.contentsOfDirectory(atPath: workspaces.path).count == 2)
+  for session in [a, b] {
+    #expect(FileManager.default.fileExists(atPath: workspaces.appendingPathComponent("\(session.recent.id.uuidString.lowercased())/workspace.json").path))
+  }
+  await first.stopIdleServices()
+  await second.stopIdleServices()
+}
+
 @Test func repositoryRegistrationSurvivesMRUEvictionAndCorruptRecentMenu() async throws {
   let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-registry-\(UUID().uuidString)")
   let sockets = URL(fileURLWithPath: "/tmp/agw-reg-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -228,6 +361,21 @@ import Testing
   #expect(reopened.recent.id == id)
   #expect(try String(contentsOf: journal, encoding: .utf8) == "existing saved task and receipts")
   await runtime.stopIdleServices()
+  // Readable but undecodable or identity-mismatched kind records retain the
+  // documented legacy-config recovery policy after eviction from the MRU menu.
+  let mismatched = RecentWorkspace(id: UUID(), name: "Wrong record", repositoryPath: repo.path,
+    isExample: false, lastOpened: Date())
+  for record in [Data("{readable but broken".utf8), try JSONEncoder().encode(mismatched)] {
+    try record.write(to: registered.appendingPathComponent("workspace-record.json"))
+    try JSONEncoder().encode(history).write(to: storage.appendingPathComponent("recent.json"))
+    let recovered = try await runtime.openRepository(repo)
+    #expect(recovered.recent.id == id)
+    #expect(try String(contentsOf: journal, encoding: .utf8) == "existing saved task and receipts")
+    let repaired = try JSONDecoder().decode(RecentWorkspace.self,
+      from: Data(contentsOf: registered.appendingPathComponent("workspace-record.json")))
+    #expect(repaired.id == id)
+    await runtime.stopIdleServices()
+  }
   // A known registration with missing config must remain explicit failure,
   // preserving its journal instead of silently creating an empty replacement.
   let config = registered.appendingPathComponent("workspace.json")

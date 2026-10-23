@@ -15,7 +15,7 @@ open "build/macos/River.app"
 python3 scripts/build_macos.py --configuration release --version 0.1.0-alpha.5 --build-number 6
 ```
 
-`--output`으로 앱 번들의 출력 경로를 지정할 수 있습니다. `--sign-identity`를 생략하면 ad-hoc 서명을 사용합니다. 버전 `0.1.0-alpha.5`은 앱의 `RiverReleaseVersion`, 숫자 부분 `0.1.0`은 `CFBundleShortVersionString`, build 번호 `5`는 `CFBundleVersion`에 기록합니다.
+`--output`으로 앱 번들의 출력 경로를 지정할 수 있습니다. `--sign-identity`를 생략하면 ad-hoc 서명을 사용합니다. 버전 `0.1.0-alpha.5`은 앱의 `RiverReleaseVersion`, 숫자 부분 `0.1.0`은 `CFBundleShortVersionString`, build 번호 `6`는 `CFBundleVersion`에 기록합니다.
 
 ## DMG 패키징과 배포
 

@@ -90,12 +90,24 @@ public actor WorkspaceRuntime {
     return temporary.appendingPathComponent("agw", isDirectory: true)
   }
 
-  public func recentWorkspaces() throws -> [RecentWorkspace] {
+  public func recentWorkspaces() async throws -> [RecentWorkspace] {
+    do { return try readRecentWorkspaces() }
+    catch is DecodingError {
+      // Re-read under the writer lock: a concurrent writer may have replaced
+      // the corrupt bytes since the first read. Never quarantine its new file.
+      let lock = try await historyLock()
+      defer { lock.release() }
+      return try readRecentWorkspaces(recoverCorruption: true)
+    }
+  }
+
+  private func readRecentWorkspaces(recoverCorruption: Bool = false) throws -> [RecentWorkspace] {
     let file = storage.appendingPathComponent("recent.json")
     guard FileManager.default.fileExists(atPath: file.path) else { return [] }
     let data = try Data(contentsOf: file)
     do { return try JSONDecoder().decode([RecentWorkspace].self, from: data).sorted { $0.lastOpened > $1.lastOpened } }
-    catch is DecodingError {
+    catch let error as DecodingError {
+      guard recoverCorruption else { throw error }
       try? FileManager.default.moveItem(at: file, to: storage.appendingPathComponent("recent-corrupt-\(UUID().uuidString).json"))
       return []
     }
@@ -136,7 +148,7 @@ public actor WorkspaceRuntime {
     // Publish the repository identity under a cross-process lock before startup.
     let lock = try await registrationLock(for: info.path)
     defer { lock.release() }
-    if let existing = try recentWorkspaces().first(where: {
+    if let existing = try await recentWorkspaces().first(where: {
       !$0.isExample && $0.repositoryPath == info.path
     }),
       FileManager.default.fileExists(atPath: config(existing.id).path)
@@ -161,6 +173,20 @@ public actor WorkspaceRuntime {
     try preparePrivateDirectories([storage, locks])
     let key = SHA256.hash(data: Data(repositoryPath.utf8)).map { String(format: "%02x", $0) }.joined()
     let file = locks.appendingPathComponent(key + ".lock")
+    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+    while true {
+      try Task.checkCancellation()
+      do { return try WorkspaceLease(url: file, exclusive: true) }
+      catch StartupFailure.workspaceBusy {
+        guard ContinuousClock.now < deadline else { throw StartupFailure.workspaceBusy }
+        try await Task.sleep(for: .milliseconds(50))
+      }
+    }
+  }
+
+  private func historyLock() async throws -> WorkspaceLease {
+    try preparePrivateDirectories([storage])
+    let file = storage.appendingPathComponent("recent-history.lock")
     let deadline = ContinuousClock.now.advanced(by: .seconds(30))
     while true {
       try Task.checkCancellation()
@@ -251,7 +277,7 @@ public actor WorkspaceRuntime {
     try await coalesce("example") { try await self.createOrOpenExample() }
   }
   private func createOrOpenExample() async throws -> WorkspaceSession {
-    if let existing = try recentWorkspaces().first(where: \.isExample),
+    if let existing = try await recentWorkspaces().first(where: \.isExample),
       FileManager.default.fileExists(atPath: existing.repositoryPath),
       FileManager.default.fileExists(atPath: config(existing.id).path)
     {
@@ -273,7 +299,7 @@ public actor WorkspaceRuntime {
     let session = try await start(recent)
     // Publish the workspace identity before preparation so retries reuse its
     // operation/journal even if preparation is slow or fails.
-    try remember(recent)
+    try await remember(recent)
     return try await prepareExample(session)
   }
   private func prepareExample(_ session: WorkspaceSession) async throws -> WorkspaceSession {
@@ -303,7 +329,7 @@ public actor WorkspaceRuntime {
         if !current.isRunning {
           // Terminal failures are inspectable in the normal Task UI, with its
           // retry/recovery controls, instead of generating another example.
-          try remember(session.recent)
+          try await remember(session.recent)
           return session
         }
         try await Task.sleep(for: .milliseconds(100))
@@ -319,7 +345,7 @@ public actor WorkspaceRuntime {
 
   private func activate(_ recent: RecentWorkspace) async throws -> WorkspaceSession {
     let session = try await start(recent)
-    try remember(session.recent)
+    try await remember(session.recent)
     return session
   }
 
@@ -475,11 +501,15 @@ public actor WorkspaceRuntime {
     try JSONEncoder().encode(recent).write(
       to: directory(recent.id).appendingPathComponent("workspace-record.json"), options: .atomic)
   }
-  private func remember(_ recent: RecentWorkspace) throws {
+  private func remember(_ recent: RecentWorkspace) async throws {
+    // Repository registration locks have already been released here. Hold only
+    // this storage-wide lock through the complete history read/modify/write.
+    let lock = try await historyLock()
+    defer { lock.release() }
     var recent = recent
     recent.lastOpened = Date()
     try saveRecord(recent)
-    var history = try recentWorkspaces().filter {
+    var history = try readRecentWorkspaces(recoverCorruption: true).filter {
       $0.id != recent.id && !(recent.isExample && $0.isExample)
     }
     history.insert(recent, at: 0)
