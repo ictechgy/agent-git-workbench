@@ -616,10 +616,10 @@ pub fn configure(
     // Restrict edits to local config; imported/global remotes must not be
     // silently shadowed. Git's own remove also updates upstream/ref metadata.
     if action != "add" {
-        let prefix = format!("remote.{name}.");
+        let section = format!("remote.{name}");
         let selected = |cfg: Vec<(String, String)>| {
             cfg.into_iter()
-                .filter(|(key, _)| key.starts_with(&prefix))
+                .filter(|(key, _)| key.rsplit_once('.').is_some_and(|(s, _)| s == section))
                 .collect::<Vec<_>>()
         };
         let effective = selected(config(path)?);
@@ -2437,5 +2437,28 @@ mod tests {
                 &["config", "--local", "--remove-section", "remote.mixed"],
             );
         }
+        // A separate remote with a dotted name does not change ownership of
+        // its wholly local prefix-named neighbor.
+        fs::write(
+            &imported,
+            "[remote \"partial.backup\"]\n\turl = https://host/backup.git\n",
+        )
+        .unwrap();
+        git(&f.client, &["config", "remote.partial.fetch", mapping]);
+        for action in ["update", "remove"] {
+            configure(
+                &f.client,
+                &state(&f.client).unwrap().state_hash,
+                action,
+                "partial",
+                (action == "update").then_some("https://host/repaired.git"),
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            git(&f.client, &["config", "remote.partial.backup.url"]),
+            "https://host/backup.git"
+        );
     }
 }
