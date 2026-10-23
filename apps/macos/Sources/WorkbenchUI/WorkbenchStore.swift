@@ -990,7 +990,8 @@ public final class WorkbenchStore: ObservableObject {
       op = try await client.call(
         "execute_plan", params: ["plan_id": .string(plan.details.id), "idempotency_key": .string(key)])
     } catch {
-      guard !(error is ServiceFailure) else { throw error }
+      guard !(error is ServiceFailure),
+        (error as? TransportFailure)?.requestMayHaveBeenSent != false else { throw error }
       let warning = TaskSubmissionWarning(id: warningID, workspaceTitle: originTitle,
         workspacePath: originPath, message: UIError.submissionOutcomeUnknown.localizedDescription)
       if !submissionWarnings.contains(where: { $0.id == warningID }) { submissionWarnings.append(warning) }
@@ -1023,7 +1024,7 @@ public final class WorkbenchStore: ObservableObject {
       try await work()
     } catch {
       let service = error as? ServiceFailure
-      let unknown = action != nil && (service == nil
+      let unknown = action != nil && (error as? TransportFailure)?.requestMayHaveBeenSent != false && (service == nil
         || ["git_write_outcome_unknown", "write_outcome_unknown"].contains(service?.code ?? ""))
       if unknown, let action {
         submissionWarnings.append(TaskSubmissionWarning(id: warningID, workspaceTitle: originTitle,
@@ -1177,7 +1178,8 @@ extension WorkbenchStore {
       result = try await client.call(plan.action.rawValue, params: values)
     } catch {
       let service = error as? ServiceFailure
-      let unknown = service == nil || ["write_outcome_unknown", "git_write_outcome_unknown", "remote_outcome_unknown"].contains(service?.code ?? "")
+      let unknown = (error as? TransportFailure)?.requestMayHaveBeenSent != false
+        && (service == nil || ["write_outcome_unknown", "git_write_outcome_unknown", "remote_outcome_unknown"].contains(service?.code ?? ""))
       if unknown {
         let warning = TaskSubmissionWarning(id: plan.scope.socket + ":remote:" + plan.id.uuidString,
           workspaceTitle: plan.title, workspacePath: plan.repositoryPath,

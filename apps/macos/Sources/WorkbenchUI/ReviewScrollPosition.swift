@@ -62,6 +62,9 @@ struct ReviewScrollPosition: NSViewRepresentable {
           self, selector: #selector(boundsChanged), name: NSView.boundsDidChangeNotification,
           object: candidate.contentView)
         NotificationCenter.default.addObserver(
+          self, selector: #selector(beginScroll), name: NSScrollView.willStartLiveScrollNotification,
+          object: candidate)
+        NotificationCenter.default.addObserver(
           self, selector: #selector(liveScroll), name: NSScrollView.didLiveScrollNotification,
           object: candidate)
         NotificationCenter.default.addObserver(
@@ -107,16 +110,18 @@ struct ReviewScrollPosition: NSViewRepresentable {
       liveScrolling = false
     }
     @objc private func documentChanged() { restore() }
+    @objc private func beginScroll() { liveScrolling = true }
     @objc private func liveScroll() { liveScrolling = true; record() }
     @objc private func endScroll() { record(); liveScrolling = false }
     @objc private func boundsChanged() {
-      restore()
       // Layout changes/unmounting can clamp an old view to zero; they are not
       // new reading positions. Keyboard and scrollbar scrolling still count.
       let event = NSApplication.shared.currentEvent?.type
       if liveScrolling || event == .scrollWheel || event == .keyDown || event == .leftMouseDragged {
         record()
+        return
       }
+      restore()
     }
     private func record() {
       guard enabled, !restoring, let id, let scroll, scroll.window != nil else { return }

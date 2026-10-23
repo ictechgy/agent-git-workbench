@@ -12,6 +12,16 @@ public enum TransportFailure: Error, LocalizedError, Sendable {
   case unsupportedSchema(Int)
   case system(String, Int32)
 
+  /// Only failures before the first send can rule out a submitted request.
+  /// Send/reply failures remain conservative because partial delivery is possible.
+  public var requestMayHaveBeenSent: Bool {
+    switch self {
+    case .invalidSocketPath, .oversizedRequest: false
+    case .system(let action, _): !["socket", "timeout 설정", "연결"].contains(action)
+    default: true
+    }
+  }
+
   public var errorDescription: String? {
     switch self {
     case .invalidSocketPath: "작업 엔진에 연결하지 못했습니다. 저장소를 다시 열어 주세요."

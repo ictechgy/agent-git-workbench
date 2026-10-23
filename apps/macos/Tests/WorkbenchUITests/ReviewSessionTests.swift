@@ -128,3 +128,31 @@ private func reviewDiff(_ hunks: [String], key: String = "file-1", snapshot: Str
   NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
   #expect(scroll.contentView.bounds.minY == 0)
 }
+
+@Test @MainActor func userScrollReplacesAnUnreachablePendingCheckpoint() {
+  let store = WorkbenchStore()
+  let id = ReviewFileID(location: .init(repoId: "a"), path: "file.swift", staged: false, stashOID: nil)
+  store.rememberReviewOffset(420, content: "exact diff", at: id)
+  let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+    styleMask: [.borderless], backing: .buffered, defer: false)
+  window.isReleasedWhenClosed = false
+  let scroll = NSScrollView(frame: window.contentView!.bounds)
+  window.contentView = scroll
+  let document = FlippedReviewDocument(frame: NSRect(x: 0, y: 0, width: 600,
+    height: scroll.contentView.bounds.height + 80))
+  scroll.documentView = document
+  let coordinator = ReviewScrollPosition.Coordinator()
+  defer { coordinator.detach(); window.close() }
+  coordinator.configure(store: store, id: id, content: "exact diff", enabled: true)
+  coordinator.attach(to: scroll)
+  #expect(scroll.contentView.bounds.minY == 80)
+  #expect(store.reviewOffset(content: "exact diff", at: id) == 420)
+  NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+  scroll.contentView.scroll(to: NSPoint(x: 0, y: 20))
+  NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+  NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
+  #expect(scroll.contentView.bounds.minY == 20)
+  #expect(store.reviewOffset(content: "exact diff", at: id) == 20)
+  NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
+  #expect(scroll.contentView.bounds.minY == 20)
+}

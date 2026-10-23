@@ -34,7 +34,7 @@ public enum DiffLines {
       switch scalar.value {
       case 0...8, 10...31: output.unicodeScalars.append(Unicode.Scalar(0x2400 + scalar.value)!)
       case 0x7f: output += "␡"
-      case 0x85, 0x2028, 0x2029, 0x202a...0x202e, 0x2066...0x2069:
+      case 0x85, 0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a...0x202e, 0x2066...0x2069:
         output += String(format: "⟨U+%04X⟩", scalar.value)
       default: output.unicodeScalars.append(scalar)
       }

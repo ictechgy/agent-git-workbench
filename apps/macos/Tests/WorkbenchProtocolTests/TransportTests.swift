@@ -3,6 +3,28 @@ import Foundation
 import Testing
 @testable import WorkbenchProtocol
 
+private struct DeliveryFailureCase: Sendable {
+  let failure: TransportFailure
+  let mayHaveBeenSent: Bool
+}
+
+@Test(arguments: [
+  DeliveryFailureCase(failure: .invalidSocketPath, mayHaveBeenSent: false),
+  DeliveryFailureCase(failure: .oversizedRequest, mayHaveBeenSent: false),
+  DeliveryFailureCase(failure: .system("socket", EMFILE), mayHaveBeenSent: false),
+  DeliveryFailureCase(failure: .system("timeout 설정", EINVAL), mayHaveBeenSent: false),
+  DeliveryFailureCase(failure: .system("연결", ECONNREFUSED), mayHaveBeenSent: false),
+  DeliveryFailureCase(failure: .system("전송", EPIPE), mayHaveBeenSent: true),
+  DeliveryFailureCase(failure: .system("수신", EAGAIN), mayHaveBeenSent: true),
+  DeliveryFailureCase(failure: .system("unrecognized phase", EIO), mayHaveBeenSent: true),
+  DeliveryFailureCase(failure: .invalidReply, mayHaveBeenSent: true),
+  DeliveryFailureCase(failure: .oversizedReply, mayHaveBeenSent: true),
+  DeliveryFailureCase(failure: .unsupportedSchema(2), mayHaveBeenSent: true),
+])
+private func transportDeliveryClassificationOnlyExcludesProvenUnsentFailures(value: DeliveryFailureCase) {
+  #expect(value.failure.requestMayHaveBeenSent == value.mayHaveBeenSent)
+}
+
 // Only a new private Unix socket is used; no application service or user repo.
 private final class ReplyServer: @unchecked Sendable {
   let path = "/tmp/agw-test-\(UUID().uuidString.prefix(12)).sock"

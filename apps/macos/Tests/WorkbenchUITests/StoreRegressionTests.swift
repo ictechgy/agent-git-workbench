@@ -1573,6 +1573,43 @@ private final class RemoteReplies: @unchecked Sendable {
   var writeCount: Int { lock.withLock { calls.filter { $0.0 != "get_remote_state" }.count } }
 }
 
+@Test(arguments: ["commit", "execute_plan", "configure_remote"]) @MainActor
+func oversizedUnsentWritesKeepDraftAndDoNotWarnOfUnknownOutcome(method: String) async throws {
+  let git = GitMutationReplies(); let submission = SubmissionReplies(); let remote = RemoteReplies()
+  let server = try TestService { request in
+    let name = request["method"] as? String ?? ""
+    if name == "plan_task" || name == "execute_plan" { return submission.respond(request) }
+    if name == "get_remote_state" || name.hasSuffix("_remote") { return remote.respond(request) }
+    return git.respond(request)
+  }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  #expect(store.canEdit)
+  let oversized = String(repeating: "x", count: 1024 * 1024)
+  store.commitMessage = oversized
+  switch method {
+  case "commit":
+    await store.commit()
+    #expect(store.error?.contains("요청 크기 제한") == true)
+  case "execute_plan":
+    let plan = try await store.planTask(group: "group", label: "Task", slug: "task", mode: "isolated")
+    do { try await store.executePlan(plan, key: oversized); Issue.record("Oversized plan submission succeeded") }
+    catch TransportFailure.oversizedRequest {}
+  default:
+    await store.loadRemoteState()
+    let plan = try store.remotePlan(.configure, remote: "origin")
+    do {
+      try await store.executeRemote(plan, configuration: "update", url: oversized)
+      Issue.record("Oversized remote configuration succeeded")
+    } catch TransportFailure.oversizedRequest {}
+    #expect(store.remoteError?.contains("요청 크기 제한") == true)
+  }
+  #expect(store.submissionWarnings.isEmpty)
+  #expect(store.commitMessage == oversized)
+  #expect(store.repository?.snapshot.head == "head-1")
+  #expect(git.writeCount == 0); #expect(submission.lock.withLock { submission.executeCalls } == 0)
+  #expect(remote.writeCount == 0)
+}
+
 @Test @MainActor func remoteActionsStayDisabledUntilCurrentSnapshotHasRemoteMetadata() async throws {
   let replies = RemoteReplies(); let server = try TestService { replies.respond($0) }
   let store = WorkbenchStore(socketPath: server.path); await store.connect()

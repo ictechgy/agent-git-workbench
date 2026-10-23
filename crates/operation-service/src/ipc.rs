@@ -96,7 +96,7 @@ fn serve_with_accept(
             }
             Err(error) if transient_accept_error(&error) => {
                 // Resource pressure and disconnected peers affect this accept,
-                // not the listener's lifetime. Bound retries under fd pressure.
+                // not the listener's lifetime. Rate-limit retries under fd pressure.
                 thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
@@ -108,6 +108,7 @@ fn serve_with_accept(
             }
         }
     }
+    drop(listener);
     // The shutdown response is fully written before the process exits. Existing
     // read requests can finish; no new mutation is accepted after stopping=true.
     for handler in handlers {
@@ -293,19 +294,40 @@ mod tests {
             "in-flight".into(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
-        let running = service.clone();
-        let worker = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(80));
-            running.active.lock().unwrap().remove("in-flight");
-        });
         let socket = temp.path().join("ipc/service.sock");
-        let result = serve_with_accept(service.clone(), &socket, |_| {
-            Err(std::io::Error::from_raw_os_error(libc::EBADF))
+        let path = socket.clone();
+        let running = service.clone();
+        let server = thread::spawn(move || {
+            serve_with_accept(running, &path, |_| {
+                Err(std::io::Error::from_raw_os_error(libc::EBADF))
+            })
         });
-        let drained = service.active.lock().unwrap().is_empty();
-        worker.join().unwrap();
+        let start = Instant::now();
+        while !service.is_stopping() {
+            assert!(start.elapsed() < Duration::from_secs(3));
+            thread::sleep(Duration::from_millis(2));
+        }
+        // Hold the admitted worker until the refusal check completes, ensuring
+        // the listener closes before draining rather than after the last join.
+        let probe_start = Instant::now();
+        let refused = loop {
+            if UnixStream::connect(&socket).is_err() {
+                break true;
+            }
+            if probe_start.elapsed() >= Duration::from_millis(60) {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        let draining = !server.is_finished();
+        service.active.lock().unwrap().remove("in-flight");
+        let result = server.join().unwrap();
         assert!(result.is_err());
-        assert!(drained);
+        assert!(draining);
+        assert!(
+            refused,
+            "listener still accepted connections while draining"
+        );
         assert!(service.is_stopping());
         assert!(!socket.exists());
     }

@@ -46,6 +46,14 @@ import Testing
   #expect(hunk.split[1].after?.number == 2)
 }
 
+@Test(arguments: [0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069] as [UInt32])
+func diffDisplayShowsEveryDirectionalControl(_ value: UInt32) throws {
+  let scalar = try #require(Unicode.Scalar(value))
+  let source = "before" + String(scalar) + "after"
+  #expect(DiffLines.displayText(source) == "before" + String(format: "⟨U+%04X⟩", value) + "after")
+  #expect(DiffLines.parse(["@@ -1 +1 @@\n-old\n+\(source)\n"])[0].split[0].after?.text == source)
+}
+
 @Test func noNewlineMetadataDoesNotConsumeSourceLines() {
   let text =
     "@@ -1 +1 @@\n-before\n\\ No newline at end of file\n+after\n\\ No newline at end of file\n"

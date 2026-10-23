@@ -86,7 +86,7 @@ struct DockWorkspace: View {
             drag.bounds = CGRect(origin: .zero, size: size)
           }
       }.background(WorkbenchTheme.chrome)
-        .onExitCommand(perform: drag.pane == nil ? nil : { drag.cancel() })
+        .onExitCommand { drag.cancel() }
         .onReceive(
           NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
         ) { _ in drag.cancel() }

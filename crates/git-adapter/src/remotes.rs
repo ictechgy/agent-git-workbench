@@ -106,6 +106,9 @@ fn edit_local_config(path: &Path, edit: impl FnOnce(&Path) -> Result<()>) -> Res
     edit(&lock_path)?;
     // Respect even an editor which does not honor Git's lock convention.
     ensure!(fs::read(&config)? == original, "stale_remote_state");
+    // A config writer may replace the staged inode; preserve the original
+    // access mode on the final inode as well as on the initial copy.
+    fs::set_permissions(&lock_path, meta.permissions())?;
     fs::File::open(&lock_path)?.sync_all()?;
     fs::rename(&lock_path, &config)?;
     lock.0 = None;
@@ -448,8 +451,7 @@ fn state_policy(path: &Path, policy: Policy) -> Result<RemoteState> {
     let mut names = BTreeMap::<String, ()>::new();
     for (key, _) in &cfg {
         if let Some(rest) = key.strip_prefix("remote.")
-            && let Some((name, field)) = rest.rsplit_once('.')
-            && matches!(field, "url" | "pushurl")
+            && let Some((name, _)) = rest.rsplit_once('.')
         {
             names.insert(name.to_string(), ());
         }
@@ -610,9 +612,10 @@ pub fn configure(
         &[
             "config",
             "--local",
+            "--no-includes",
             "--null",
-            "--get-all",
-            &format!("remote.{name}.url"),
+            "--get-regexp",
+            &format!("^remote\\.{}\\.", name.replace('.', "\\.")),
         ],
         false,
     );
@@ -826,13 +829,10 @@ fn integrate_fetched(
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", branch_config)
         .env("GIT_CONFIG_VALUE_0", "");
-    if let Err(error) = run_local_command(command, true) {
-        ensure!(
-            !super::snapshot(path).is_ok_and(|current| &current == local_snapshot),
-            "remote_pull_blocked"
-        );
-        return Err(error);
-    }
+    // An unchanged tracked snapshot cannot prove a failed checkout made no
+    // writes: interrupted integration may have left ignored paths behind.
+    // Keep every unsuccessful integration conservative about its outcome.
+    run_local_command(command, true)?;
     ensure!(
         super::oid(path, "HEAD").is_ok_and(|head| head == target),
         "remote_outcome_unknown"
@@ -1723,6 +1723,19 @@ mod tests {
             fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
             0o640
         );
+        edit_local_config(&f.client, |file| {
+            // Model an atomic config writer replacing its input's inode.
+            let replacement = file.with_extension("replacement");
+            fs::write(&replacement, fs::read(file)?)?;
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o644))?;
+            fs::rename(replacement, file)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
     #[test]
     fn config_transaction_respects_external_locks_and_uncooperative_edits() {
@@ -1824,7 +1837,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string(),
-            "remote_pull_blocked"
+            "remote_outcome_unknown"
         );
         assert_eq!(
             fs::read_to_string(f.client.join("local.env")).unwrap(),
@@ -2259,5 +2272,109 @@ mod tests {
                 .iter()
                 .any(|r| r.name == "Company")
         );
+    }
+    #[test]
+    fn fetch_only_remote_is_preserved_on_add_and_can_be_explicitly_repaired() {
+        let f = Fixture::new();
+        let mapping = "+refs/heads/reviewed/*:refs/remotes/partial/*";
+        git(&f.client, &["config", "remote.partial.fetch", mapping]);
+        let original = fs::read(f.client.join(".git/config")).unwrap();
+        let ordinary_git = Command::new("/usr/bin/git")
+            .current_dir(&f.client)
+            .args(["remote", "add", "partial", "https://host/repo.git"])
+            .output()
+            .unwrap();
+        assert!(!ordinary_git.status.success());
+        assert_eq!(fs::read(f.client.join(".git/config")).unwrap(), original);
+        let current = state(&f.client).unwrap();
+        assert_eq!(
+            configure(
+                &f.client,
+                &current.state_hash,
+                "add",
+                "partial",
+                Some("https://host/repo.git"),
+                None
+            )
+            .unwrap_err()
+            .to_string(),
+            "remote_name_conflict"
+        );
+        assert_eq!(fs::read(f.client.join(".git/config")).unwrap(), original);
+        let partial = current
+            .remotes
+            .iter()
+            .find(|remote| remote.name == "partial")
+            .unwrap();
+        assert!(!partial.supported);
+        configure(
+            &f.client,
+            &current.state_hash,
+            "update",
+            "partial",
+            Some("https://host/repaired.git"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(git(&f.client, &["config", "remote.partial.fetch"]), mapping);
+        assert!(
+            state(&f.client)
+                .unwrap()
+                .remotes
+                .iter()
+                .any(|remote| remote.name == "partial" && remote.supported)
+        );
+        git(&f.client, &["config", "--unset", "remote.partial.url"]);
+        configure(
+            &f.client,
+            &state(&f.client).unwrap().state_hash,
+            "remove",
+            "partial",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !state(&f.client)
+                .unwrap()
+                .remotes
+                .iter()
+                .any(|remote| remote.name == "partial")
+        );
+        let imported = f.client.join(".git/imported.conf");
+        fs::write(
+            &imported,
+            "[remote \"imported\"]\n\tfetch = +refs/heads/*:refs/remotes/imported/*\n",
+        )
+        .unwrap();
+        git(
+            &f.client,
+            &["config", "include.path", imported.to_str().unwrap()],
+        );
+        let original = fs::read(f.client.join(".git/config")).unwrap();
+        let current = state(&f.client).unwrap();
+        assert!(
+            current
+                .remotes
+                .iter()
+                .any(|remote| remote.name == "imported" && !remote.supported)
+        );
+        for action in ["update", "remove"] {
+            let url = (action == "update").then_some("https://host/repaired.git");
+            assert_eq!(
+                configure(
+                    &f.client,
+                    &current.state_hash,
+                    action,
+                    "imported",
+                    url,
+                    None
+                )
+                .unwrap_err()
+                .to_string(),
+                "remote_not_local"
+            );
+        }
+        assert_eq!(fs::read(f.client.join(".git/config")).unwrap(), original);
     }
 }
