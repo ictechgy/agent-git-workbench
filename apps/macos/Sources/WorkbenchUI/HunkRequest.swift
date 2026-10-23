@@ -35,6 +35,15 @@ struct HunkRequest: Identifiable {
     \(HandoffText.block(patch))
     """
   }
+
+  func previewText(instruction: String) -> String {
+    DiffLines.displayMultilineText(text(instruction: instruction))
+  }
+
+  func copy(instruction: String, to pasteboard: NSPasteboard) -> Bool {
+    pasteboard.clearContents()
+    return pasteboard.setString(text(instruction: instruction), forType: .string)
+  }
 }
 
 struct HunkRequestSheet: View {
@@ -43,18 +52,24 @@ struct HunkRequestSheet: View {
   @State private var instruction = ""
   @State private var copied = false
   var body: some View {
+    let previewInstruction = instruction.isEmpty ? "[수정할 내용을 입력하세요]" : instruction
+    let preview = request.previewText(instruction: previewInstruction)
     VStack(alignment: .leading, spacing: 14) {
       Text("AI에 전달할 수정 요청").font(.title3.weight(.semibold))
-      Text("\(request.repository) · \(request.path)")
+      Text(DiffLines.displayText("\(request.repository) · \(request.path)"))
         .font(.callout).foregroundStyle(.secondary).lineLimit(2)
       TextField("이 변경에서 무엇을 수정할까요?", text: $instruction, axis: .vertical)
         .textFieldStyle(.roundedBorder).lineLimit(2...4)
         .onChange(of: instruction) { _, _ in copied = false }
       ScrollView {
-        Text(request.text(instruction: instruction.isEmpty ? "[수정할 내용을 입력하세요]" : instruction))
+        Text(preview)
           .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
           .frame(maxWidth: .infinity, alignment: .leading).padding(12)
       }.background(WorkbenchTheme.canvas, in: RoundedRectangle(cornerRadius: 6))
+      if preview != request.text(instruction: previewInstruction) {
+        Text("제어·방향 문자는 미리보기에서만 기호로 표시합니다. 복사하면 원본 문자가 포함됩니다.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
       Text("선택한 변경과 요청문을 복사합니다. AI로 자동 전송하지 않습니다.")
         .font(.caption).foregroundStyle(.secondary)
       HStack {
@@ -62,8 +77,7 @@ struct HunkRequestSheet: View {
         Spacer()
         Button("닫기") { dismiss() }.keyboardShortcut(.cancelAction)
         Button("요청문 복사") {
-          NSPasteboard.general.clearContents()
-          copied = NSPasteboard.general.setString(request.text(instruction: instruction), forType: .string)
+          copied = request.copy(instruction: instruction, to: .general)
         }.buttonStyle(.borderedProminent)
           .disabled(instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
           .keyboardShortcut(.defaultAction)

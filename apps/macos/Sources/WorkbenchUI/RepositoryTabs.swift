@@ -47,7 +47,7 @@ struct RepositoryTabs: View {
     let repo = op?.repos.first { $0.id == id }
     return HStack(spacing: 6) {
       Button {
-        store.select(.init(repoId: id, opId: op?.id))
+        store.selectRepository(id)
       } label: {
         HStack(spacing: 7) {
           Image(systemName: "externaldrive")

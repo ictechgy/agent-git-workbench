@@ -886,6 +886,9 @@ private final class ScopedContextReplies: @unchecked Sendable {
   var holdSave = false
   var heldTaskID: String?
   var workspaceID = "space"
+  var workspaceRepositoryIDs = ["a"]
+  var statusSelections: [WorktreeSelection] = []
+  var mutationCalls: [String] = []
   let arrived = Flag()
   let gate = DispatchSemaphore(value: 0)
   var statusFails = false
@@ -914,7 +917,9 @@ private final class ScopedContextReplies: @unchecked Sendable {
       var result: Any
       switch method {
       case "list_workspaces":
-        result = [["schema_version": 1, "id": workspaceID, "repositories": [["id": "a", "path": "/tmp/synthetic"]], "groups": []]]
+        result = [["schema_version": 1, "id": workspaceID, "repositories": workspaceRepositoryIDs.map {
+          ["id": $0, "path": $0 == "a" ? "/tmp/synthetic" : "/tmp/synthetic-\($0)"]
+        }, "groups": []]]
       case "list_operations":
         if listFails { return ["schema_version": 1, "error": ["code": "list_failed", "message": "synthetic operation list failure"]] }
         result = paginated
@@ -930,8 +935,11 @@ private final class ScopedContextReplies: @unchecked Sendable {
       case "retry_operation", "materialize", "cancel_operation":
         preparationCalls.append(method); result = currentOperation()
       case "get_repo_status":
+        statusSelections.append(.init(repoId: params["repo_id"] as? String ?? "", opId: params["op_id"] as? String))
         if statusFails { return ["schema_version": 1, "error": ["code": "git_failed", "message": "synthetic status failure"]] }
         return nil
+      case "commit", "stage_hunk", "execute_plan", "configure_remote":
+        mutationCalls.append(method); return nil
       case "get_task":
         let id = params["task_id"] as? String ?? ""
         result = ["id": id, "operation_id": id == "task" ? "op" : id,
@@ -1764,6 +1772,41 @@ func completedCloneKeepsKnownOutcomeWhenFollowUpReadsFail(phase: String) async t
 // do not unregister SwiftUI keyboard shortcuts or resign a native text editor.
 @Suite(.serialized) @MainActor
 struct FocusedDockKeyboardRegressionTests {
+  @Test func restoringLayoutKeepsVisibleCommitEditorResponderAndTyping() async throws {
+    let replies = GitMutationReplies()
+    let server = try TestService { replies.respond($0) }
+    let store = WorkbenchStore(socketPath: server.path); await store.connect()
+    let suite = "river-dock-restore-editor-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let layout = LayoutPreferences(defaults: defaults); layout.apply(.balanced)
+    store.commitMessage = "visible enlarged commit draft"
+    let (window, host) = mount(store: store, layout: layout, defaults: defaults)
+    defer { window.close() }
+    try await settle(host)
+    layout.focusPane(.commit)
+    try await settle(host)
+    let editor = try #require(textViews(in: host).first { $0.isEditable && $0.string == store.commitMessage })
+    #expect(window.makeFirstResponder(editor))
+    window.sendEvent(try key(window, characters: "x", code: 7))
+    try await settle(host)
+    let draftBeforeRestore = store.commitMessage
+    #expect(draftBeforeRestore != "visible enlarged commit draft")
+    #expect(window.firstResponder === editor)
+
+    layout.restorePaneLayout()
+    try await settle(host)
+    #expect(layout.focusedPane == nil)
+    #expect(window.firstResponder === editor)
+    #expect(textViews(in: host).contains { $0 === editor })
+    window.sendEvent(try key(window, characters: "y", code: 16))
+    try await settle(host)
+    #expect(store.commitMessage != draftBeforeRestore)
+    #expect(editor.string == store.commitMessage)
+    #expect(replies.writeCount == 0)
+    withExtendedLifetime(server) {}
+  }
+
   @Test func escapeRestoresFocusedPaneThroughWindowDispatch() async throws {
     let replies = GitMutationReplies()
     let server = try TestService { replies.respond($0) }
@@ -1925,4 +1968,100 @@ struct FocusedDockKeyboardRegressionTests {
   private func textViews(in view: NSView) -> [NSTextView] {
     (view as? NSTextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
   }
+}
+
+@Test @MainActor func repositoryNavigationPreservesFolderKindTaskContextAndPerFolderDrafts() async throws {
+  let replies = ScopedContextReplies(); replies.workspaceRepositoryIDs = ["a", "b"]
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let task = try #require(store.operations.first)
+  store.selectTask(task); try await settleSelection(store)
+  store.commitMessage = "task folder a draft"
+  store.taskContext.draft?.notes = "shared unsaved Task notes"
+
+  store.select(.init(repoId: "a")); try await settleSelection(store)
+  store.commitMessage = "original folder a draft"
+  let originalReview = store.currentReviewID
+  let readsBeforeSameRepository = replies.lock.withLock { replies.statusSelections.count }
+  store.selectRepository("a")
+  try await Task.sleep(for: .milliseconds(20))
+  #expect(store.selection == WorktreeSelection(repoId: "a"))
+  #expect(store.currentReviewID == originalReview)
+  #expect(store.commitMessage == "original folder a draft")
+  #expect(replies.lock.withLock { replies.statusSelections.count } == readsBeforeSameRepository)
+
+  store.selectRepository("b"); try await settleSelection(store)
+  #expect(store.selection == WorktreeSelection(repoId: "b"))
+  #expect(store.contextOperation?.id == "op")
+  #expect(store.taskContext.draft?.notes == "shared unsaved Task notes")
+  #expect(replies.lock.withLock { replies.statusSelections.last } == WorktreeSelection(repoId: "b"))
+  #expect(store.commitMessage.isEmpty)
+  store.commitMessage = "original folder b draft"
+  store.selectRepository("a"); try await settleSelection(store)
+  #expect(store.commitMessage == "original folder a draft")
+
+  store.select(.init(repoId: "a", opId: task.id)); try await settleSelection(store)
+  #expect(store.commitMessage == "task folder a draft")
+  store.selectRepository("b"); try await settleSelection(store)
+  #expect(store.selection == WorktreeSelection(repoId: "b", opId: task.id))
+  #expect(store.contextOperation?.id == task.id)
+  #expect(store.taskContext.draft?.notes == "shared unsaved Task notes")
+  #expect(replies.lock.withLock { replies.statusSelections.last } == WorktreeSelection(repoId: "b", opId: task.id))
+  #expect(store.commitMessage.isEmpty)
+  store.commitMessage = "task folder b draft"
+  store.selectRepository("a"); try await settleSelection(store)
+  #expect(store.commitMessage == "task folder a draft")
+  let taskReview = store.currentReviewID
+  let taskReadsBeforeSameRepository = replies.lock.withLock { replies.statusSelections.count }
+  store.selectRepository("a")
+  try await Task.sleep(for: .milliseconds(20))
+  #expect(store.selection == WorktreeSelection(repoId: "a", opId: task.id))
+  #expect(store.currentReviewID == taskReview)
+  #expect(store.commitMessage == "task folder a draft")
+  #expect(replies.lock.withLock { replies.statusSelections.count } == taskReadsBeforeSameRepository)
+
+  store.select(.init(repoId: "a")); try await settleSelection(store)
+  store.selectRepository("b"); try await settleSelection(store)
+  #expect(store.commitMessage == "original folder b draft")
+  store.select(.init(repoId: "b", opId: task.id)); try await settleSelection(store)
+  #expect(store.commitMessage == "task folder b draft")
+  #expect(store.taskContext.draft?.notes == "shared unsaved Task notes")
+  #expect(replies.lock.withLock { replies.mutationCalls.isEmpty })
+}
+
+@Test(arguments: [false, true]) @MainActor
+func repositoryNavigationPreservesUnresolvedContextAndLeavesKnownNonmemberContext(reconnect: Bool) async throws {
+  let replies = ScopedContextReplies(); replies.workspaceRepositoryIDs = ["a", "b", "c"]
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.selectTask(try #require(store.operations.first)); try await settleSelection(store)
+  store.select(.init(repoId: "a")); try await settleSelection(store)
+  store.taskContext.draft?.notes = "Task draft must not become repository notes"
+  replies.lock.withLock { replies.paginated = true; replies.lookupFails = true }
+  await store.refresh()
+  if reconnect { await store.connect() } // Also cover unresolved context with no retained operation summary.
+  #expect(store.contextTaskInformationUnavailable); #expect(!store.taskContext.loaded)
+  let contextRequests = replies.lock.withLock { replies.requests.count }
+
+  store.selectRepository("b"); try await settleSelection(store)
+  #expect(store.selection == WorktreeSelection(repoId: "b"))
+  #expect(store.contextOperation?.id == (reconnect ? nil : "op"))
+  #expect(!store.taskContext.loaded)
+  if !reconnect { #expect(store.taskContext.draft?.notes == "Task draft must not become repository notes") }
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.requests.count } == contextRequests)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.notes } == "")
+  #expect(replies.lock.withLock { replies.contexts["op"]?.revision } == 7)
+
+  replies.lock.withLock { replies.paginated = false; replies.lookupFails = false }
+  await store.refresh()
+  #expect(store.taskContext.loaded)
+  #expect(store.taskContext.draft?.notes == "Task draft must not become repository notes")
+  store.selectRepository("c"); try await settleSelection(store)
+  #expect(store.selection == WorktreeSelection(repoId: "c"))
+  #expect(store.contextOperation == nil)
+  #expect(store.taskContext.bundle?.context.purpose == "repository intent")
+  #expect(store.taskContext.draft?.notes == "")
+  #expect(replies.lock.withLock { replies.statusSelections.last } == WorktreeSelection(repoId: "c"))
+  #expect(replies.lock.withLock { replies.mutationCalls.isEmpty })
 }

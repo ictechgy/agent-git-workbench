@@ -51,7 +51,26 @@ func diffDisplayShowsEveryDirectionalControl(_ value: UInt32) throws {
   let scalar = try #require(Unicode.Scalar(value))
   let source = "before" + String(scalar) + "after"
   #expect(DiffLines.displayText(source) == "before" + String(format: "⟨U+%04X⟩", value) + "after")
+  #expect(
+    DiffLines.displayMultilineText(source) == "before" + String(format: "⟨U+%04X⟩", value) + "after"
+  )
   #expect(DiffLines.parse(["@@ -1 +1 @@\n-old\n+\(source)\n"])[0].split[0].after?.text == source)
+}
+
+@Test func multilineDiffDisplayRetainsPatchLinesAndTabsWhileExposingOtherControlScalars() {
+  let source =
+    "@@ -1 +1 @@\tfunction\u{202e}name\n-old\r\n+\tnew\u{0}hidden\u{b}vertical\u{c}page\u{7f}delete\u{85}next\u{2028}line\u{2029}paragraph\n"
+  let display = DiffLines.displayMultilineText(source)
+  #expect(
+    display
+      == "@@ -1 +1 @@\tfunction⟨U+202E⟩name\n-old␍\n+\tnew␀hidden␋vertical␌page␡delete⟨U+0085⟩next⟨U+2028⟩line⟨U+2029⟩paragraph\n"
+  )
+  #expect(display.unicodeScalars.filter { $0 == "\n" }.count == 3)
+  #expect(display.unicodeScalars.filter { $0 == "\t" }.count == 2)
+  #expect(DiffLines.displayText(source) == display.replacingOccurrences(of: "\n", with: "␊"))
+  #expect(
+    DiffLines.displayMultilineText("\tordinary\n+\u{301}combining 한글\n")
+      == "\tordinary\n+\u{301}combining 한글\n")
 }
 
 @Test func noNewlineMetadataDoesNotConsumeSourceLines() {

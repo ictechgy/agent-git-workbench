@@ -16,6 +16,22 @@ use workbench_domain::{Snapshot, SnapshotSummary, digest, hash, safe_relative};
 pub fn git(path: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(git_bytes(path, args)?).context("unsupported_encoding")
 }
+/// Decode one Git filesystem-path record. Only its final LF is a terminator;
+/// spaces, tabs, CRs and any preceding LFs belong to the pathname.
+/// Do not pass output containing several path records: embedded LFs make that
+/// format ambiguous. The same rule applies to Git's `gitdir` backlink file.
+pub fn path_from_record(record: &str) -> Result<PathBuf> {
+    let path = record.strip_suffix('\n').unwrap_or(record);
+    ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "unsupported_git_path_encoding"
+    );
+    Ok(PathBuf::from(path))
+}
+/// Run a fixed Git command that emits exactly one filesystem path.
+pub fn git_path(path: &Path, args: &[&str]) -> Result<PathBuf> {
+    path_from_record(&git(path, args)?)
+}
 pub fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
     command(path, args, None)
 }
@@ -227,18 +243,15 @@ pub fn check_changes(path: &Path) -> Result<(workbench_domain::Verdict, String, 
 }
 pub fn root(path: &Path) -> Result<PathBuf> {
     let path = fs::canonicalize(path).context("invalid_repo_path")?;
-    let root = fs::canonicalize(git(&path, &["rev-parse", "--show-toplevel"])?.trim())?;
+    let root = fs::canonicalize(git_path(&path, &["rev-parse", "--show-toplevel"])?)?;
     ensure!(root == path, "repo_path_must_be_root");
     Ok(root)
 }
 pub fn common_dir(path: &Path) -> Result<PathBuf> {
-    Ok(fs::canonicalize(
-        git(
-            path,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?
-        .trim(),
-    )?)
+    Ok(fs::canonicalize(git_path(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?)?)
 }
 pub fn oid(path: &Path, reference: &str) -> Result<String> {
     ensure!(
@@ -285,29 +298,18 @@ pub fn no_conflicts(path: &Path) -> Result<()> {
         git_bytes(path, &["ls-files", "-u", "-z"])?.is_empty(),
         "merge_conflict"
     );
-    // Resolve all per-worktree paths in one process. No paths are cached: a
-    // linked worktree or its integration state may change between reads.
-    let paths = git(
-        path,
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "MERGE_HEAD",
-            "--git-path",
-            "CHERRY_PICK_HEAD",
-            "--git-path",
-            "REVERT_HEAD",
-            "--git-path",
-            "rebase-merge",
-            "--git-path",
-            "rebase-apply",
-        ],
-    )?;
-    let paths: Vec<_> = paths.lines().collect();
-    ensure!(paths.len() == 5, "unsupported_git_path_encoding");
-    for p in paths {
-        ensure!(!Path::new(p.trim()).exists(), "integration_in_progress");
+    // All five integration markers are per-worktree. Resolve their directory
+    // in one process, without ambiguous LF-delimited multiple-path output.
+    // Nothing is cached: linked-worktree state may change between reads.
+    let git_dir = git_path(path, &["rev-parse", "--absolute-git-dir"])?;
+    for marker in [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+    ] {
+        ensure!(!git_dir.join(marker).exists(), "integration_in_progress");
     }
     Ok(())
 }
@@ -411,7 +413,7 @@ fn snapshot_with_scope(
     })
 }
 pub fn verify_checkout(path: &Path, source: &Path, branch: &str, expected_oid: &str) -> Result<()> {
-    let locked = git(
+    let locked = git_path(
         path,
         &[
             "rev-parse",
@@ -420,7 +422,7 @@ pub fn verify_checkout(path: &Path, source: &Path, branch: &str, expected_oid: &
             "locked",
         ],
     )?;
-    ensure!(!Path::new(locked.trim()).exists(), "worktree_locked");
+    ensure!(!locked.exists(), "worktree_locked");
     ensure!(
         root(path)? == fs::canonicalize(path)?,
         "wrong_worktree_root"
@@ -839,6 +841,28 @@ pub fn stash_diff(path: &Path, requested_oid: &str, file: &str) -> Result<Diff> 
 pub fn diff(path: &Path, file: &str, staged: bool) -> Result<Diff> {
     safe_relative(file)?;
     let snap = snapshot_with_scope(path, false, true)?;
+    // A literal Git pathspec can still select a whole directory. Bind the
+    // request to an exact file, including tracked files missing on disk.
+    // Staged deletions are absent from snapshot.files, so retain their review
+    // through exact NUL-delimited index/HEAD names, without a disk-file check.
+    let exact_file = snap.files.contains_key(file) || {
+        let names = git_bytes(
+            path,
+            &[
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--",
+                file,
+            ],
+        )?;
+        names.strip_suffix(&[0]) == Some(file.as_bytes())
+    };
+    ensure!(exact_file, "invalid_diff_path");
     let mut args = vec![
         "diff",
         "--src-prefix=a/",
@@ -855,6 +879,13 @@ pub fn diff(path: &Path, file: &str, staged: bool) -> Result<Diff> {
     let bytes = git_bytes(path, &args)?;
     let invalid_encoding = std::str::from_utf8(&bytes).is_err();
     let text = String::from_utf8_lossy(&bytes).into_owned();
+    ensure!(
+        text.split_inclusive('\n')
+            .filter(|line| line.starts_with("diff --git "))
+            .count()
+            <= 1,
+        "unsupported_multi_file_diff"
+    );
     ensure!(
         snap == snapshot_with_scope(path, false, true)?,
         "stale_read_snapshot"
@@ -886,6 +917,13 @@ fn parse_diff(
         }
     }
     let can_stage_hunks = editable
+        // Body lines carry a diff prefix, so an unprefixed boundary cannot be
+        // mistaken for source text, even when a filename or line is quoted.
+        && text
+            .split_inclusive('\n')
+            .filter(|line| line.starts_with("diff --git "))
+            .count()
+            == 1
         && !hunks.is_empty()
         && !header.contains("new file mode")
         && !header.contains("deleted file mode")

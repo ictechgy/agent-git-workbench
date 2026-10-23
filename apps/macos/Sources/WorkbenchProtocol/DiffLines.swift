@@ -29,9 +29,20 @@ public struct ParsedHunk: Sendable, Identifiable {
 public enum DiffLines {
   /// Keep one Git line on one visual row without changing the reviewed bytes.
   public static func displayText(_ text: String) -> String {
+    displayText(text, preservingLineFeeds: false)
+  }
+
+  /// Show captured patches and request previews without hiding control scalars.
+  /// Ordinary LF line breaks and tabs retain their layout; stored bytes stay raw.
+  public static func displayMultilineText(_ text: String) -> String {
+    displayText(text, preservingLineFeeds: true)
+  }
+
+  private static func displayText(_ text: String, preservingLineFeeds: Bool) -> String {
     var output = ""
     for scalar in text.unicodeScalars {
       switch scalar.value {
+      case 10 where preservingLineFeeds: output.unicodeScalars.append(scalar)
       case 0...8, 10...31: output.unicodeScalars.append(Unicode.Scalar(0x2400 + scalar.value)!)
       case 0x7f: output += "␡"
       case 0x85, 0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a...0x202e, 0x2066...0x2069:

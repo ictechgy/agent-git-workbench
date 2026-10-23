@@ -39,7 +39,13 @@ struct DockFocusResponderReset: NSViewRepresentable {
     DispatchQueue.main.async { [weak view, weak coordinator] in
       guard coordinator?.revision == revision, let window = view?.window else { return }
       // Keep Escape in this dock's responder chain after ending hidden input.
-      window.makeFirstResponder(isEnlarged ? view : nil)
+      if isEnlarged {
+        window.makeFirstResponder(view)
+      } else if window.firstResponder === view {
+        // A user may have focused an editor in the enlarged pane. It remains
+        // visible after restoration and must keep receiving keyboard input.
+        window.makeFirstResponder(nil)
+      }
     }
   }
 }

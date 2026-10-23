@@ -147,6 +147,15 @@ private struct DockNodeView: View {
               .padding(.horizontal, 6)
           }
           Menu {
+            if panes.count > 1 {
+              Menu("탭 선택") {
+                ForEach(panes) { pane in
+                  Button(paneTitle(pane)) { layout.selectPane(pane) }
+                    .disabled(pane == displayed)
+                }
+              }
+              Divider()
+            }
             Button(layout.focusedPane == displayed ? "원래 배치로" : "패널 크게 보기") {
               layout.focusPane(displayed)
             }
@@ -254,32 +263,36 @@ private struct DockTab: View {
   @State private var hovering = false
   @State private var cursorPushed = false
   var body: some View {
-    HStack(spacing: 7) {
-      Image(
-        systemName: layout.focusedPane == nil
-          ? "circle.grid.2x3.fill" : "arrow.up.left.and.arrow.down.right"
-      )
-      .font(.system(size: 8))
-      .foregroundStyle(WorkbenchTheme.secondaryText).opacity(hovering ? 1 : 0.35)
-      Label {
-        Text(title)
-      } icon: {
-        Image(systemName: pane.symbol)
-          .foregroundStyle(selected ? WorkbenchTheme.accentText : WorkbenchTheme.secondaryText)
+    Button {
+      layout.selectPane(pane)
+    } label: {
+      HStack(spacing: 7) {
+        Image(
+          systemName: layout.focusedPane == nil
+            ? "circle.grid.2x3.fill" : "arrow.up.left.and.arrow.down.right"
+        )
+        .font(.system(size: 8))
+        .foregroundStyle(WorkbenchTheme.secondaryText).opacity(hovering ? 1 : 0.35)
+        Label {
+          Text(title)
+        } icon: {
+          Image(systemName: pane.symbol)
+            .foregroundStyle(selected ? WorkbenchTheme.accentText : WorkbenchTheme.secondaryText)
+        }
       }
-    }
-    .font(.system(size: 12, weight: selected ? .semibold : .regular))
-    .foregroundStyle(selected ? WorkbenchTheme.primaryText : WorkbenchTheme.secondaryText)
-    .padding(.horizontal, 12).frame(height: 32)
-    .background(selected && showsSelection ? WorkbenchTheme.canvas : .clear)
-    .overlay(alignment: .top) {
-      if selected && showsSelection {
-        Rectangle().fill(WorkbenchTheme.accent).frame(height: 2).allowsHitTesting(false)
+      .font(.system(size: 12, weight: selected ? .semibold : .regular))
+      .foregroundStyle(selected ? WorkbenchTheme.primaryText : WorkbenchTheme.secondaryText)
+      .padding(.horizontal, 12).frame(height: 32)
+      .background(selected && showsSelection ? WorkbenchTheme.canvas : .clear)
+      .overlay(alignment: .top) {
+        if selected && showsSelection {
+          Rectangle().fill(WorkbenchTheme.accent).frame(height: 2).allowsHitTesting(false)
+        }
       }
+      .contentShape(Rectangle())
     }
-    .contentShape(Rectangle())
-    .onTapGesture { layout.selectPane(pane) }
-    .gesture(
+    .buttonStyle(.plain)
+    .simultaneousGesture(
       DragGesture(minimumDistance: 6, coordinateSpace: .named("dock-canvas"))
         .updating($dragging) { _, state, _ in state = true }
         .onChanged { value in
@@ -326,8 +339,7 @@ private struct DockTab: View {
     .accessibilityElement().accessibilityLabel(
       layout.focusedPane == nil ? "\(title) 패널 · 드래그하여 이동" : "\(title) 패널"
     )
-    .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-    .accessibilityAction { layout.selectPane(pane) }
+    .accessibilityAddTraits(selected ? .isSelected : [])
     .help(
       layout.focusedPane == nil
         ? "제목을 끌어 다른 패널의 좌·우·위·아래에 놓기 · 중앙은 탭 합치기"

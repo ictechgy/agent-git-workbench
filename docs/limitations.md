@@ -14,10 +14,10 @@
 
 ## 배포·호환성
 
-- `0.1.0-alpha.4`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
+- `0.1.0-alpha.5`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
 - 선언된 최소 대상은 macOS 14이지만 실행 검증은 macOS 27.0.1에서만 했습니다. macOS 14–26에서의 호환성은 아직 검증하지 않았습니다.
 - 앱과 Rust 엔진은 함께 배포하지만 Git은 포함하지 않습니다. 런타임은 `/usr/bin:/bin:/usr/sbin:/sbin` 경로를 사용하므로 Apple Command Line Tools 또는 Xcode의 Git이 필요합니다. Homebrew 전용 경로의 Git은 사용하지 않습니다. 내장 예제의 준비 스크립트는 `python3`도 실행합니다.
-- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.4.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
+- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.5.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
 - 자동 업데이트 기능은 없습니다. 새 버전은 GitHub Releases에서 다운로드해 교체합니다.
 - 라이선스는 미확정이며 현재 Cargo 메타데이터는 `UNLICENSED`입니다.
 
@@ -34,6 +34,7 @@
 
 - GitHub·GitLab·Bitbucket·자체 서버에 공통 SSH/HTTPS를 사용하며 Apple Git 2.41 이상이 필요합니다. 제공자별 로그인·토큰 입력·PR 기능은 없습니다. 인증은 기존 SSH agent·기본 키·known-host 파일 또는 Apple Git 키체인 helper에서 준비해야 합니다.
 - 사용자 SSH config·별칭·ProxyCommand·임의 identity 경로, 대화형 인증, 임의 credential helper는 사용하지 않습니다. 파일 경로·`file://`·`git://`·외부 remote helper·URL rewrite·방향별 복수 URL·partial/promisor 저장소와 보안을 바꾸는 HTTP 설정은 거부합니다.
+- 등록된 저장소 이름에 탭·줄바꿈 같은 제어문자가 들어 있으면 원격 작업은 현재 지원하지 않습니다. Git 경로의 공백은 보존하지만, 경로를 등록 이름으로 만드는 정책과 원격 ID 검증의 통합은 후속입니다.
 - Fetch는 선택 원격의 브랜치 head만 갱신·prune합니다. 태그·서브모듈 동기화는 포함하지 않습니다. Pull은 깨끗한 폴더에서 빨리 감기로만, push는 확인한 commit을 한 브랜치로만 전송합니다.
 - 원격 설정과 추적 ref는 연결된 worktree에 공유됩니다. 확인 이후 URL·로컬 상태·원격 ref가 바뀌면 재확인이 필요합니다. 응답을 잃거나 시간이 초과되면 Git과 서버 상태를 확인하기 전 재시도하지 마세요. 클라이언트를 닫아도 서버 작업 취소가 확정되는 것은 아닙니다.
 - Clone bootstrap helper가 강제 종료되면 별도 process group의 Git 자식이 계속 실행되거나 대상 옆의 앱 소유 staging 폴더가 남을 수 있습니다. timeout은 모든 자식 종료·정리 완료를 보증하지 않습니다. 종료된 helper가 뒤늦게 staging을 게시할 수는 없지만, 대상·부모 폴더와 Git·서버 상태를 확인하기 전 재시도하지 마세요. 자동 재실행·잔여 폴더 삭제는 하지 않습니다.
@@ -48,6 +49,7 @@
 - 파일·staged 선택의 빠른 연속 입력은 80ms 동안 묶습니다. 클라이언트가 취소해도 이미 시작한 서버 읽기는 계속될 수 있습니다.
 - 패널 확대는 기존 화면 트리를 유지합니다. 숨겨진 브랜치 패널의 조회도 앱 활성 상태에서 계속될 수 있으며, 확대만으로 CPU·메모리 사용이 줄어드는 것은 보장하지 않습니다.
 - 방문한 workspace 엔진은 세션 동안 남을 수 있습니다. 많은 저장소를 오갈 때의 RSS·에너지·복귀 시간은 아직 측정하지 않았습니다.
+- 패널을 크게 볼 때 숨겨진 입력을 차단하기 위해 키보드 포커스를 정리합니다. 계속 보이는 입력란도 확대 직후에는 다시 선택해야 할 수 있습니다. 확대된 패널에서 사용자가 선택한 편집기 포커스는 원래 배치로 돌아갈 때 유지합니다.
 - 큰 journal에서 최초 JSON index 생성이 엔진의 시작 대기 시간을 넘을 가능성, 큰 파일 snapshot·checkpoint 저장 비용도 계측 과제입니다.
 
 ## 복구·조회 동작과 남은 UX 과제

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--native", action="store_true", help="compatibility flag; the app is always native")
-    args = parser.parse_args()
+    parser.parse_args()
     binary = ROOT / "target/debug/workbench"
     if not binary.exists():
         raise SystemExit("Run cargo build --workspace first")

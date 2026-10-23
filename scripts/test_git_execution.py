@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Check fixture bootstrap against an isolated synthetic Git global configuration."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile

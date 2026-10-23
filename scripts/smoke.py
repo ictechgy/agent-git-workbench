@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Real CLI + private Unix socket scenario; only creates synthetic temp repos."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile

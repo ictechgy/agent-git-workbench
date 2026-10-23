@@ -64,17 +64,12 @@ fn serve_with_accept(
         // Reap under sustained accepts too, and bound Git reads and idle peers.
         handlers.retain(|handler: &thread::JoinHandle<()>| !handler.is_finished());
         match accept(&listener) {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
                 if handlers.len() >= MAX_HANDLERS {
-                    if stream
-                        .set_write_timeout(Some(Duration::from_millis(100)))
-                        .is_ok()
-                    {
-                        let _ = stream.write_all(b"{\"schema_version\":1,\"error\":{\"code\":\"service_busy\",\"message\":\"Too many concurrent requests; retry shortly.\"}}\n");
-                    }
+                    reject_busy(stream);
                     continue;
                 }
                 let service = service.clone();
@@ -131,6 +126,23 @@ fn serve_with_accept(
     }
     cleanup?;
     Ok(())
+}
+fn reject_busy(mut stream: UnixStream) {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut writer = DeadlineWriter {
+        stream: &mut stream,
+        deadline,
+    };
+    if writer.write_all(b"{\"schema_version\":1,\"error\":{\"code\":\"service_busy\",\"message\":\"Too many concurrent requests; retry shortly.\"}}\n").is_err() { return; }
+    // A caller sends its frame before reading. Closing with unread request
+    // bytes can reset the connection or give it EPIPE instead of service_busy.
+    // Drain just one bounded frame, without dispatch or another handler. Share
+    // the short deadline with the reply so an idle peer cannot stall accepts.
+    let reader = DeadlineReader {
+        stream: &stream,
+        deadline,
+    };
+    let _ = BufReader::new(reader.take(MAX_REQUEST + 1)).read_until(b'\n', &mut Vec::new());
 }
 fn transient_accept_error(error: &std::io::Error) -> bool {
     matches!(
@@ -364,6 +376,51 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(1));
     }
     #[test]
+    fn busy_response_survives_a_request_larger_than_the_socket_buffer() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let size: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    client.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let worker = thread::spawn(move || reject_busy(server));
+        let mut frame = vec![b' '; 128 * 1024];
+        frame.extend_from_slice(b"{\"method\":\"list_workspaces\",\"params\":{}}\n");
+        let sent = client.write_all(&frame);
+        let mut response = String::new();
+        let received = BufReader::new(&client).read_line(&mut response);
+        drop(client);
+        worker.join().unwrap();
+        assert!(
+            sent.is_ok(),
+            "overload dropped a still-writing request: {sent:?}"
+        );
+        received.unwrap();
+        let response: Response = serde_json::from_str(&response).unwrap();
+        assert_eq!(response.error.unwrap().code, "service_busy");
+    }
+    #[test]
+    fn a_busy_peer_that_never_sends_does_not_stall_the_listener() {
+        let (server, _idle_client) = UnixStream::pair().unwrap();
+        let start = Instant::now();
+        reject_busy(server);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+    #[test]
     fn idle_connections_are_bounded_and_service_recovers_after_disconnect() {
         let temp = tempfile::TempDir::new().unwrap();
         let home = temp.path().join("fixture");
@@ -387,13 +444,28 @@ mod tests {
                 method: "list_workspaces".into(),
                 params: serde_json::json!({}),
             },
-        )
-        .unwrap();
+        );
         drop(clients);
+        let recovered = loop {
+            let response = call(
+                &socket,
+                &Request {
+                    method: "list_workspaces".into(),
+                    params: serde_json::json!({}),
+                },
+            );
+            if response.as_ref().is_ok_and(|r| r.error.is_none())
+                || start.elapsed() > Duration::from_secs(5)
+            {
+                break response;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
         // Shutdown through the owning service so even a failing assertion has
         // no orphan listener or sleeping test thread.
         assert!(service.shutdown_if_idle().unwrap());
         server.join().unwrap();
-        assert_eq!(busy.error.unwrap().code, "service_busy");
+        assert_eq!(busy.unwrap().error.unwrap().code, "service_busy");
+        assert!(recovered.unwrap().error.is_none());
     }
 }

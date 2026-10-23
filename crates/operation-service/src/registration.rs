@@ -8,9 +8,7 @@ pub fn inspect(selected: &Path) -> Result<Repository> {
     let selected = fs::canonicalize(selected).context("invalid_repo_path")?;
     ensure!(selected.is_dir(), "invalid_repo_path");
     let path = fs::canonicalize(
-        git::git(&selected, &["rev-parse", "--show-toplevel"])
-            .context("not_a_repository")?
-            .trim(),
+        git::git_path(&selected, &["rev-parse", "--show-toplevel"]).context("not_a_repository")?,
     )?;
     let name = path
         .file_name()

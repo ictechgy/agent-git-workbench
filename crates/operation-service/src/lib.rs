@@ -29,6 +29,18 @@ use workbench_runner as runner;
 // cancelled worker retains its slot until it has actually exited.
 const MAX_ADMITTED_PREPARATIONS: usize = 8;
 
+fn request_budget_seconds(method: &str) -> u64 {
+    match method {
+        "configure_remote" | "fetch_remote" | "pull_remote" | "push_remote" => 345,
+        // These clients wait 180s. write_budget reserves 10s before launching
+        // one write with its own 120s budget, then refresh gets at most 15s.
+        // A 40s preflight leaves nominal response/scheduling headroom; giving
+        // preflight the entire client budget would let writes outlive it.
+        "stage_hunk" | "commit" => 40,
+        _ => 25,
+    }
+}
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -807,14 +819,17 @@ impl Service {
                 "wrong_repository"
             );
             let control = r.plan.worktree_path.join(".git");
-            let git_dir = fs::canonicalize(
-                git::git(&r.plan.worktree_path, &["rev-parse", "--absolute-git-dir"])?.trim(),
-            )?;
+            let git_dir = fs::canonicalize(git::git_path(
+                &r.plan.worktree_path,
+                &["rev-parse", "--absolute-git-dir"],
+            )?)?;
             ensure!(
                 fs::symlink_metadata(&control)?.file_type().is_file()
                     && git_dir.parent()
                         == Some(git::common_dir(&repo.path)?.join("worktrees").as_path())
-                    && fs::canonicalize(fs::read_to_string(git_dir.join("gitdir"))?.trim())?
+                    && fs::canonicalize(git::path_from_record(&fs::read_to_string(
+                        git_dir.join("gitdir"),
+                    )?)?)?
                         == control,
                 "unsafe_task_worktree"
             );
@@ -848,18 +863,9 @@ impl Service {
         Ok(true)
     }
     pub fn dispatch(self: &Arc<Self>, request: Request) -> Response {
-        // Worker threads have their own preparation budgets; interactive calls
-        // must stop spending Git time before the native client's 30s timeout.
-        let timeout = if matches!(
-            request.method.as_str(),
-            "configure_remote" | "fetch_remote" | "pull_remote" | "push_remote"
-        ) {
-            // Network operations have a separate bounded budget. Leave time to
-            // serialize the response before the client's 360 second deadline.
-            345
-        } else {
-            25
-        };
+        // Preparation workers have their own budgets. Reads must fit the 30s
+        // client wait; mutations reserve time for their separately bounded write.
+        let timeout = request_budget_seconds(&request.method);
         let result = git::with_deadline(std::time::Duration::from_secs(timeout), || {
             self.handle(request)
         });
@@ -1083,6 +1089,62 @@ pub struct Response {
 mod lifecycle_tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    fn interactive_write_after_preflight(method: &str) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("fixture");
+        let workspace = fixtures::create(&home).unwrap();
+        let path = workspace.repo("ios-app").unwrap().path.clone();
+        let service = Service::open(workspace, &home.join("journal.sqlite")).unwrap();
+        let file = "Config/Version.xcconfig";
+        let changed =
+            "// budget fixture\nMARKETING_VERSION = 2.4.0\nCURRENT_PROJECT_VERSION = 241\n";
+        let original_head = git::oid(&path, "HEAD").unwrap();
+        let untouched = fs::read(path.join("notes.txt")).unwrap();
+        fs::write(path.join(file), changed).unwrap();
+        let params = if method == "commit" {
+            git::git(&path, &["add", "--", file]).unwrap();
+            json!({"repo_id":"ios-app", "snapshot_hash":digest(&git::snapshot(&path).unwrap()).unwrap(), "message":"mutation budget regression"})
+        } else {
+            let diff = git::diff(&path, file, false).unwrap();
+            json!({"repo_id":"ios-app", "path":file, "hunk_index":0, "snapshot_hash":diff.snapshot_hash, "diff_hash":hash(diff.text.as_bytes())})
+        };
+        // Model twenty seconds of preflight already consumed, without a slow
+        // wall-clock sleep. The real dispatch keeps this outer remaining budget.
+        let remaining = Duration::from_secs(request_budget_seconds(method) - 20);
+        let response = git::with_deadline(remaining, || {
+            service.dispatch(Request {
+                method: method.into(),
+                params,
+            })
+        });
+        assert!(response.error.is_none(), "{method}: {:?}", response.error);
+        assert_eq!(
+            git::git(&path, &["show", &format!(":{file}")]).unwrap(),
+            changed
+        );
+        assert_eq!(fs::read(path.join("notes.txt")).unwrap(), untouched);
+        if method == "commit" {
+            assert_ne!(git::oid(&path, "HEAD").unwrap(), original_head);
+            assert!(
+                git::git_bytes(&path, &["diff", "--cached", "--name-only"])
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(git::oid(&path, "HEAD").unwrap(), original_head);
+        }
+    }
+
+    #[test]
+    fn hunk_staging_has_time_for_validation_after_twenty_seconds_of_preflight() {
+        interactive_write_after_preflight("stage_hunk");
+    }
+
+    #[test]
+    fn committing_has_time_for_validation_after_twenty_seconds_of_preflight() {
+        interactive_write_after_preflight("commit");
+    }
 
     fn fixture(slug: &str) -> (tempfile::TempDir, Arc<Service>, Plan) {
         let temp = tempfile::TempDir::new().unwrap();

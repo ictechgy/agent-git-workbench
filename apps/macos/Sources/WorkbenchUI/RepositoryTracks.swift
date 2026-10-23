@@ -39,7 +39,7 @@ struct RepositoryTracks<Content: View>: View {
     let repo = op?.repos.first { $0.id == id }
     return HStack(spacing: 12) {
       Button {
-        store.select(.init(repoId: id, opId: op?.id))
+        store.selectRepository(id)
       } label: {
         HStack(spacing: 12) {
           Image(systemName: "externaldrive").font(.system(size: 15))

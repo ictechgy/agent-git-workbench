@@ -66,3 +66,7 @@ Panel shortcuts toggle inclusion in the arrangement. Menu commands for an existi
 Existing v1 layouts continue to load; a new default never replaces a valid custom tree. If saved data cannot be read, River keeps the original bytes in a one-time recovery backup and shows a quiet message in Screen Configuration. Invalid named entries are excluded while valid siblings remain available. Recovery is about local presentation preferences, not Git repository data.
 
 Named layouts currently apply globally. Automatic per-repository switching, layout import/export, arbitrary theme editing and a layout lock are outside this version.
+
+Panel tab titles are native buttons. For a keyboard-accessible list of tabs in the current group, use the panel menu’s **Select Tab** (`탭 선택`). Selecting an existing tab does not move it or add an undo step.
+
+Restoring an enlarged pane keeps an editor you focused while it was enlarged. Entering enlargement still resets keyboard focus to prevent hidden editors from receiving input; select the visible editor again when needed.

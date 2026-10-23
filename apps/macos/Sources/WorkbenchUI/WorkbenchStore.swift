@@ -516,6 +516,11 @@ public final class WorkbenchStore: ObservableObject {
     await refresh()
   }
 
+  public func selectRepository(_ id: String) {
+    // Repository navigation preserves the explicitly chosen folder kind.
+    // Task context may remain active while reviewing an original checkout.
+    select(.init(repoId: id, opId: selection?.opId))
+  }
   public func select(_ value: WorktreeSelection, leaveTask: Bool = false) {
     let contextID = value.opId ?? (leaveTask || contextOperation?.repos.contains(where: { $0.id == value.repoId }) == false ? nil : activeContextOperationID)
     guard !busy, value != selection || contextID != contextOperationID else { return }

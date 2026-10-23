@@ -10,11 +10,13 @@ struct DiffWorkspace: View {
     VStack(spacing: 0) {
       HStack(spacing: 10) {
         Text(
-          store.selectedFile.isEmpty ? "파일 선택" : (store.selectedFile as NSString).lastPathComponent
+          DiffLines.displayText(
+            store.selectedFile.isEmpty ? "파일 선택" : (store.selectedFile as NSString).lastPathComponent
+          )
         )
         .font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-        .help(store.selectedFile).accessibilityLabel(
-          store.selectedFile.isEmpty ? "파일 선택" : store.selectedFile)
+        .help(DiffLines.displayText(store.selectedFile)).accessibilityLabel(
+          DiffLines.displayText(store.selectedFile.isEmpty ? "파일 선택" : store.selectedFile))
         Text(
           store.isViewingStash
             ? "\(store.selectedStash?.selector ?? "Stash") · 읽기 전용" : store.staged ? "스테이징" : "변경"
@@ -157,7 +159,9 @@ struct DiffWorkspace: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottomLeading) {
           if !diff.text.isEmpty {
-            Text(diff.text).font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+            Text(DiffLines.displayMultilineText(diff.text)).font(
+              .system(size: 10, design: .monospaced)
+            ).textSelection(.enabled)
               .padding(20)
           }
         }
@@ -169,14 +173,19 @@ struct DiffWorkspace: View {
       .sheet(item: $request) { HunkRequestSheet(request: $0) }
       .sheet(item: $previousReading) { reading in
         let checkpoint = reading.checkpoint
+        let checkpointDisplay = DiffLines.displayMultilineText(checkpoint.text)
         VStack(alignment: .leading, spacing: 14) {
           Text("이전 검토 당시의 변경").font(.headline)
           Text(checkpoint.date, format: .dateTime.month().day().hour().minute())
             .font(.caption).foregroundStyle(.secondary)
           ScrollView([.horizontal, .vertical]) {
-            Text(checkpoint.text).font(.system(size: 12, design: .monospaced))
+            Text(checkpointDisplay).font(.system(size: 12, design: .monospaced))
               .textSelection(.enabled).padding(12)
           }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          if checkpointDisplay != checkpoint.text {
+            Text("제어·방향 문자를 기호로 표시합니다. 원본 검토 기록은 그대로 유지됩니다.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
           HStack {
             Text("읽기 전용 · 이 기록으로 staging하지 않습니다.").font(.caption)
             Spacer()
@@ -274,8 +283,8 @@ private struct HunkView: View {
     VStack(spacing: 0) {
       HStack {
         Text("변경 \(hunk.id + 1)").font(.system(size: 12, weight: .semibold)).fixedSize().help(
-          hunk.header)
-        Text(hunk.header).font(.system(size: 12, design: .monospaced))
+          DiffLines.displayText(hunk.header))
+        Text(DiffLines.displayText(hunk.header)).font(.system(size: 12, design: .monospaced))
           .foregroundStyle(WorkbenchTheme.secondaryText).lineLimit(1).truncationMode(.middle)
         if changedSinceReading {
           Text("검토 후 변경").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.accentText)
@@ -372,12 +381,16 @@ private struct CodeCell: View {
     )
     .frame(height: reading.codeRowHeight).padding(.horizontal, 6)
     .background(lineBackground(cell?.kind ?? .context))
-    .accessibilityLabel(
-      cell.map {
-        "\($0.kind == .addition ? "추가" : $0.kind == .deletion ? "삭제" : "") \($0.number.map(String.init) ?? "") \($0.text)"
-      } ?? "빈 행")
+    .accessibilityLabel(cell?.codeAccessibilityLabel ?? "빈 행")
   }
 }
+
+extension DiffCell {
+  var codeAccessibilityLabel: String {
+    "\(kind == .addition ? "추가" : kind == .deletion ? "삭제" : "") \(number.map(String.init) ?? "") \(DiffLines.displayText(text))"
+  }
+}
+
 private func lineBackground(_ kind: LineKind) -> Color {
   switch kind {
   case .addition: WorkbenchTheme.addBackground

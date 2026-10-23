@@ -90,8 +90,8 @@ fn malformed_optional_scope_never_falls_back_to_the_original_repository() {
     let diff = git::diff(source, "notes.txt", false).unwrap();
     let before = [source, task].map(|path| {
         let snapshot = git::snapshot(path).unwrap();
-        let git_dir = git::git(path, &["rev-parse", "--absolute-git-dir"]).unwrap();
-        let index = std::path::PathBuf::from(git_dir.trim()).join("index");
+        let git_dir = git::git_path(path, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        let index = git_dir.join("index");
         (snapshot, index.clone(), fs::read(index).unwrap())
     });
     let original_context = f.rpc("get_task_context", json!({"repo_id":"ios-app"}));
