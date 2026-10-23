@@ -23,9 +23,10 @@ struct NativePreview {
     guard (1100...3000).contains(width), (720...2000).contains(height) else {
       throw CocoaError(.validationMissingMandatoryProperty)
     }
-    app.appearance = NSAppearance(named: highContrast
-      ? (dark ? .accessibilityHighContrastDarkAqua : .accessibilityHighContrastAqua)
-      : (dark ? .darkAqua : .aqua))
+    app.appearance = NSAppearance(
+      named: highContrast
+        ? (dark ? .accessibilityHighContrastDarkAqua : .accessibilityHighContrastAqua)
+        : (dark ? .darkAqua : .aqua))
     let mode = CommandLine.arguments[1]
     let previewStorage = FileManager.default.temporaryDirectory.appendingPathComponent(
       "agw-preview-\(UUID().uuidString)")
@@ -35,6 +36,16 @@ struct NativePreview {
     let defaults = UserDefaults(suiteName: preferenceSuite)!
     defer { defaults.removePersistentDomain(forName: preferenceSuite) }
     let layout = LayoutPreferences(defaults: defaults)
+    let reading = ReadingPreferences(defaults: defaults)
+    let diffPresentation = DiffPresentationModel()
+    if let value = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_CODE_SIZE"],
+      let size = Double(value)
+    {
+      reading.setCodeSize(size)
+    }
+    if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_COMPACT"] == "1" {
+      reading.setDensity(.compact)
+    }
     // The harness controls AppKit appearance, including Increase Contrast.
     layout.appearance = .system
     let dockSession = DockDragSession()
@@ -74,7 +85,9 @@ struct NativePreview {
       if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_SWITCH"] == "1" {
         try await verifyFolderSwitching(store)
       }
-      if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_REVIEW"] == "1" {
+      if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_REVIEW"] == "1"
+        || ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_PERSONALIZATION"] == "1"
+      {
         store.chooseFile("Sources/Session.swift", staged: false)
         for _ in 0..<200 where store.diff == nil { try await Task.sleep(for: .milliseconds(20)) }
       }
@@ -174,19 +187,40 @@ struct NativePreview {
     }
     let remoteMode = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_REMOTE"] == "1"
     if remoteMode { await store.loadRemoteState() }
+    let settingsMode =
+      ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_LAYOUT_SETTINGS"] == "1"
+    if settingsMode { _ = try seedSavedLayouts(layout) }
+    var personalizationRequestedLayout: LayoutConfiguration?
+    var personalizationPreviousLayout: LayoutConfiguration?
+    if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_PERSONALIZATION"] == "1" {
+      personalizationRequestedLayout = layout.configuration
+      layout.apply(.classic)
+      personalizationPreviousLayout = layout.configuration
+      layout.apply(.balanced)
+    }
     let content: AnyView
-    if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_LAYOUT_SETTINGS"] == "1" {
+    if settingsMode {
       content = AnyView(
-        LayoutOptions(layout: layout).background(Color(nsColor: .windowBackgroundColor)))
+        LayoutOptions(
+          layout: layout, reading: reading,
+          initialSection: LayoutOptionsSection(
+            rawValue: ProcessInfo.processInfo.environment[
+              "WORKBENCH_PREVIEW_LAYOUT_SETTINGS_SECTION"]
+              ?? "layouts") ?? .layouts
+        )
+        .background(Color(nsColor: .windowBackgroundColor)))
     } else if branchMode {
       content = AnyView(BranchesView(store: store, model: branchModel))
     } else {
       content = AnyView(
         WorkbenchRoot(
           store: store,
-          layout: layout, dockSession: dockSession
+          layout: layout, dockSession: dockSession, reading: reading,
+          diffPresentation: diffPresentation
         ).overlay(alignment: .topTrailing) {
-          if remoteMode { RemotePreviewOverlay(store: store).padding(.top, 100).padding(.trailing, 16) }
+          if remoteMode {
+            RemotePreviewOverlay(store: store).padding(.top, 100).padding(.trailing, 16)
+          }
         })
     }
     let view = NSHostingView(
@@ -194,8 +228,9 @@ struct NativePreview {
         content
         .environment(\.colorScheme, dark ? .dark : .light)
         .environment(\.controlActiveState, .active)
-        .frame(width: width, height: height))
-    view.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        .frame(width: settingsMode ? 520 : width, height: settingsMode ? 620 : height))
+    view.frame = NSRect(
+      x: 0, y: 0, width: settingsMode ? 520 : width, height: settingsMode ? 620 : height)
     let window = NSWindow(
       contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.contentView = view
@@ -208,6 +243,13 @@ struct NativePreview {
     if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_DOCKING"] == "1" {
       try await verifyDocking(
         store, layout: layout, drag: dockSession, defaults: defaults, socket: mode)
+    }
+    if ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_VERIFY_PERSONALIZATION"] == "1" {
+      try await verifyPersonalization(
+        store, layout: layout, reading: reading, presentation: diffPresentation,
+        drag: dockSession, defaults: defaults, view: view, socket: mode,
+        requestedLayout: personalizationRequestedLayout!,
+        focusPrevious: personalizationPreviousLayout!)
     }
     let dockScene = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_DOCK_SCENE"] ?? "default"
     if dockScene != "default" {
@@ -265,6 +307,13 @@ struct NativePreview {
         "Verified layout presets and saved settings with the same mounted native root; live selection, file, staging and draft preserved"
       )
     }
+    if let name = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_FOCUS_PANE"],
+      let pane = WorkbenchPane(rawValue: name)
+    {
+      layout.showPane(pane)
+      layout.focusPane(pane)
+      try await settle(view)
+    }
     view.layoutSubtreeIfNeeded()
     guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
       throw CocoaError(.fileWriteUnknown)
@@ -282,22 +331,39 @@ struct NativePreview {
 
   @MainActor private static func requireSyntheticFixture(_ store: WorkbenchStore) throws {
     guard let value = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_FIXTURE_ROOT"] else {
-      throw NSError(domain: "PreviewScope", code: 1, userInfo: [NSLocalizedDescriptionKey: "Mutation probes require scripts/native_preview.py's private synthetic fixture"])
+      throw NSError(
+        domain: "PreviewScope", code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Mutation probes require scripts/native_preview.py's private synthetic fixture"
+        ])
     }
     let root = URL(fileURLWithPath: value).resolvingSymlinksInPath().standardizedFileURL
     let parent = root.deletingLastPathComponent()
     let temporary = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath().standardizedFileURL
     func inside(_ path: String) -> Bool {
-      let components = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.pathComponents
-      return components.starts(with: root.pathComponents) && components.count > root.pathComponents.count
+      let components = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+        .pathComponents
+      return components.starts(with: root.pathComponents)
+        && components.count > root.pathComponents.count
     }
-    guard root.lastPathComponent == "fixture", parent.lastPathComponent.hasPrefix("workbench-preview-"),
+    guard root.lastPathComponent == "fixture",
+      parent.lastPathComponent.hasPrefix("workbench-preview-"),
       parent.deletingLastPathComponent().pathComponents == temporary.pathComponents,
-      let marker = try? String(contentsOf: root.appendingPathComponent(".native-preview-fixture"), encoding: .utf8),
-      URL(fileURLWithPath: marker).resolvingSymlinksInPath().standardizedFileURL.pathComponents == root.pathComponents,
+      let marker = try? String(
+        contentsOf: root.appendingPathComponent(".native-preview-fixture"), encoding: .utf8),
+      URL(fileURLWithPath: marker).resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        == root.pathComponents,
       let repositories = store.workspace?.repositories, !repositories.isEmpty,
-      repositories.allSatisfy({ inside($0.path) }), store.repository.map({ inside($0.path) }) ?? true
-    else { throw NSError(domain: "PreviewScope", code: 2, userInfo: [NSLocalizedDescriptionKey: "Refused verification outside the synthetic preview fixture"]) }
+      repositories.allSatisfy({ inside($0.path) }),
+      store.repository.map({ inside($0.path) }) ?? true
+    else {
+      throw NSError(
+        domain: "PreviewScope", code: 2,
+        userInfo: [
+          NSLocalizedDescriptionKey: "Refused verification outside the synthetic preview fixture"
+        ])
+    }
   }
 
   @MainActor private static func waitForSelection(_ store: WorkbenchStore) async throws {
@@ -313,7 +379,9 @@ struct NativePreview {
   }
 
   @MainActor private static func diffScroll(in view: NSView) -> NSScrollView? {
-    if view.identifier?.rawValue == "workbench.diff-scroll-position" { return view.enclosingScrollView }
+    if view.identifier?.rawValue == "workbench.diff-scroll-position" {
+      return view.enclosingScrollView
+    }
     for child in view.subviews {
       if let found = diffScroll(in: child) { return found }
     }
@@ -321,54 +389,87 @@ struct NativePreview {
   }
 
   @MainActor private static func verifyTaskContext(_ store: WorkbenchStore) async throws {
-    guard let selection = store.selection, let opID = selection.opId, let initial = store.repository else {
+    guard let selection = store.selection, let opID = selection.opId, let initial = store.repository
+    else {
       throw CocoaError(.validationMissingMandatoryProperty)
     }
     let client = ServiceClient(socketPath: store.socketPath)
     let model = store.taskContext
     var values: [String: JSONValue] = [
-      "repo_id": .string(selection.repoId), "context_op_id": .string(opID), "expected_revision": .number(0),
+      "repo_id": .string(selection.repoId), "context_op_id": .string(opID),
+      "expected_revision": .number(0),
       "purpose": .string("앱을 다시 열어도 로그인 상태가 이어지도록 세션 복원을 개선합니다."),
       "criteria": .array([.string("재시작 후 세션이 복원된다"), .string("만료된 세션은 로그인 화면으로 돌아간다")]),
-      "references": .array([.string("docs/session-recovery.md")]), "notes": .string("오프라인·만료 세션 테스트를 추가하고 API 저장소의 준비 실패를 확인해야 합니다.")]
+      "references": .array([.string("docs/session-recovery.md")]),
+      "notes": .string("오프라인·만료 세션 테스트를 추가하고 API 저장소의 준비 실패를 확인해야 합니다."),
+    ]
     let _: TaskContextBundle = try await client.call("save_task_context", params: values)
     await model.refresh()
-    guard model.bundle?.context.revision == 1 else { throw CocoaError(.validationMissingMandatoryProperty) }
+    guard model.bundle?.context.revision == 1 else {
+      throw CocoaError(.validationMissingMandatoryProperty)
+    }
     await model.runCheck(snapshot: initial.snapshotHash, at: selection)
     guard model.bundle?.verifications.first?.kind == "git_check",
-      model.bundle?.verifications.first?.verdict == "passed" else { throw CocoaError(.validationMissingMandatoryProperty) }
+      model.bundle?.verifications.first?.verdict == "passed"
+    else { throw CocoaError(.validationMissingMandatoryProperty) }
     let beforeCount = model.bundle?.verifications.count
-    let staleRecord = await model.record(kind: "human_report", verdict: "passed", command: "", note: "must not save", at: "obsolete-screen")
-    guard !staleRecord, model.bundle?.verifications.count == beforeCount else { throw CocoaError(.validationMissingMandatoryProperty) }
-    let recorded = await model.record(kind: "ai_report", verdict: "passed", command: "swift test (AI report)", note: "AI가 세션 테스트 통과를 보고했습니다. 앱은 실행을 관찰하지 않았습니다.", at: model.identity)
-    guard recorded, let report = model.bundle?.verifications.first, report.kind == "ai_report", report.afterSnapshotHash == nil else { throw CocoaError(.validationMissingMandatoryProperty) }
+    let staleRecord = await model.record(
+      kind: "human_report", verdict: "passed", command: "", note: "must not save",
+      at: "obsolete-screen")
+    guard !staleRecord, model.bundle?.verifications.count == beforeCount else {
+      throw CocoaError(.validationMissingMandatoryProperty)
+    }
+    let recorded = await model.record(
+      kind: "ai_report", verdict: "passed", command: "swift test (AI report)",
+      note: "AI가 세션 테스트 통과를 보고했습니다. 앱은 실행을 관찰하지 않았습니다.", at: model.identity)
+    guard recorded, let report = model.bundle?.verifications.first, report.kind == "ai_report",
+      report.afterSnapshotHash == nil
+    else { throw CocoaError(.validationMissingMandatoryProperty) }
     let file = URL(fileURLWithPath: initial.path).appendingPathComponent("Sources/Session.swift")
     let original = try String(contentsOf: file, encoding: .utf8)
-    try (original + "// whitespace fixture   \n").write(to: file, atomically: false, encoding: .utf8)
+    try (original + "// whitespace fixture   \n").write(
+      to: file, atomically: false, encoding: .utf8)
     await store.refresh()
     guard let changed = store.repository, changed.snapshotHash != initial.snapshotHash,
-      changed.snapshot.head == initial.snapshot.head, changed.snapshot.indexHash == initial.snapshot.indexHash,
-      report.freshness(repoId: selection.repoId, opId: selection.opId, snapshot: changed.snapshotHash, requirements: model.bundle?.context.requirementsHash).contains("이전 코드")
+      changed.snapshot.head == initial.snapshot.head,
+      changed.snapshot.indexHash == initial.snapshot.indexHash,
+      report.freshness(
+        repoId: selection.repoId, opId: selection.opId, snapshot: changed.snapshotHash,
+        requirements: model.bundle?.context.requirementsHash
+      ).contains("이전 코드")
     else { throw CocoaError(.validationMissingMandatoryProperty) }
     await model.runCheck(snapshot: changed.snapshotHash, at: selection)
-    guard model.bundle?.verifications.first?.verdict == "failed" else { throw CocoaError(.validationMissingMandatoryProperty) }
+    guard model.bundle?.verifications.first?.verdict == "failed" else {
+      throw CocoaError(.validationMissingMandatoryProperty)
+    }
     values["expected_revision"] = .number(1)
-    values["criteria"] = .array([.string("재시작 후 세션이 복원된다"), .string("만료된 세션은 로그인 화면으로 돌아간다"), .string("오프라인에서도 저장된 세션을 복원한다")])
+    values["criteria"] = .array([
+      .string("재시작 후 세션이 복원된다"), .string("만료된 세션은 로그인 화면으로 돌아간다"), .string("오프라인에서도 저장된 세션을 복원한다"),
+    ])
     let _: TaskContextBundle = try await client.call("save_task_context", params: values)
     await model.refresh()
     guard let receipt = model.bundle?.verifications.first,
-      receipt.freshness(repoId: selection.repoId, opId: selection.opId, snapshot: changed.snapshotHash, requirements: model.bundle?.context.requirementsHash).contains("완료 조건 변경"),
-      let handoff = await model.handoff(), handoff.contains("### \"api\""), handoff.contains("### \"ios-app\""),
-      handoff.contains("AI가 보고한 결과"), handoff.contains("오프라인에서도"), handoff.contains("통합 검증/승인을 뜻하지 않습니다")
+      receipt.freshness(
+        repoId: selection.repoId, opId: selection.opId, snapshot: changed.snapshotHash,
+        requirements: model.bundle?.context.requirementsHash
+      ).contains("완료 조건 변경"),
+      let handoff = await model.handoff(), handoff.contains("### \"api\""),
+      handoff.contains("### \"ios-app\""),
+      handoff.contains("AI가 보고한 결과"), handoff.contains("오프라인에서도"),
+      handoff.contains("통합 검증/승인을 뜻하지 않습니다")
     else { throw CocoaError(.validationMissingMandatoryProperty) }
-    try handoff.write(to: URL(fileURLWithPath: CommandLine.arguments[2]).deletingPathExtension().appendingPathExtension("handoff.txt"), atomically: true, encoding: .utf8)
+    try handoff.write(
+      to: URL(fileURLWithPath: CommandLine.arguments[2]).deletingPathExtension()
+        .appendingPathExtension("handoff.txt"), atomically: true, encoding: .utf8)
     await store.connect()
     guard store.taskContext.bundle?.context.revision == 2,
       store.taskContext.bundle?.verifications.count == 3,
       store.repository?.snapshot.head == initial.snapshot.head,
       store.repository?.snapshot.indexHash == initial.snapshot.indexHash
     else { throw CocoaError(.validationMissingMandatoryProperty) }
-    print("Verified task context persistence/reconnect, observed vs AI report, stale screen guard, code/criteria freshness, failed whitespace check, multi-repo handoff and unchanged HEAD/index")
+    print(
+      "Verified task context persistence/reconnect, observed vs AI report, stale screen guard, code/criteria freshness, failed whitespace check, multi-repo handoff and unchanged HEAD/index"
+    )
   }
 
   @MainActor private static func verifyReviewContinuity(
@@ -378,15 +479,22 @@ struct NativePreview {
       store.canMarkRead, diff.path == "Sources/Session.swift", diff.hunks.count == 2,
       let scroll = diffScroll(in: view),
       (scroll.documentView?.frame.height ?? 0) > scroll.contentView.bounds.height + 300
-    else { throw NSError(domain: "ReviewProbe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing long mounted diff"] ) }
+    else {
+      throw NSError(
+        domain: "ReviewProbe", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Missing long mounted diff"])
+    }
     scroll.contentView.scroll(to: NSPoint(x: 0, y: 280))
     scroll.reflectScrolledClipView(scroll.contentView)
     NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
-    guard abs(store.currentReviewScrollOffset - 280) < 2 else { throw CocoaError(.validationMissingMandatoryProperty) }
+    guard abs(store.currentReviewScrollOffset - 280) < 2 else {
+      throw CocoaError(.validationMissingMandatoryProperty)
+    }
     store.markCurrentFileRead()
     guard store.currentReadingState == .reviewed,
       let request = store.hunkRequestText(0, instruction: "Handle an empty session"),
-      request.contains(repo.path), request.contains(diff.snapshotHash), request.contains(diff.hunks[0]),
+      request.contains(repo.path), request.contains(diff.snapshotHash),
+      request.contains(diff.hunks[0]),
       !request.contains(diff.hunks[1])
     else { throw CocoaError(.validationMissingMandatoryProperty) }
     store.onlyUnreviewedFiles = true
@@ -406,21 +514,29 @@ struct NativePreview {
       store.commitMessage == "검토 중인 로그인 변경",
       abs((diffScroll(in: view)?.contentView.bounds.minY ?? -1) - 280) < 2,
       store.repository?.snapshotHash == repo.snapshotHash
-    else { throw NSError(domain: "ReviewProbe", code: 2, userInfo: [NSLocalizedDescriptionKey: "Reading/scroll restoration failed"]) }
+    else {
+      throw NSError(
+        domain: "ReviewProbe", code: 2,
+        userInfo: [NSLocalizedDescriptionKey: "Reading/scroll restoration failed"])
+    }
     let saved = layout.configuration
     layout.dockPane(.diff, nextTo: .files, edge: .bottom)
     try await Task.sleep(for: .milliseconds(200))
     layout.update { $0 = saved }
     try await Task.sleep(for: .milliseconds(200))
     guard abs((diffScroll(in: view)?.contentView.bounds.minY ?? -1) - 280) < 2 else {
-      throw NSError(domain: "ReviewProbe", code: 3, userInfo: [NSLocalizedDescriptionKey: "Docking lost scroll position"])
+      throw NSError(
+        domain: "ReviewProbe", code: 3,
+        userInfo: [NSLocalizedDescriptionKey: "Docking lost scroll position"])
     }
     // External edits only touch this probe's newly-created synthetic worktree.
     let peer = URL(fileURLWithPath: repo.path).appendingPathComponent("README.md")
     let savedPeer = try Data(contentsOf: peer)
     try (savedPeer + Data("\n// Unrelated external edit\n".utf8)).write(to: peer)
     await store.refresh()
-    guard store.currentReadingState == .reviewed else { throw CocoaError(.validationMissingMandatoryProperty) }
+    guard store.currentReadingState == .reviewed else {
+      throw CocoaError(.validationMissingMandatoryProperty)
+    }
     try savedPeer.write(to: peer)
     let file = URL(fileURLWithPath: repo.path).appendingPathComponent(diff.path)
     let source = try Data(contentsOf: file)
@@ -432,36 +548,63 @@ struct NativePreview {
       abs(diffScroll(in: view)?.contentView.bounds.minY ?? -1) < 2,
       store.repository?.snapshot.head == repo.snapshot.head,
       store.repository?.snapshot.indexHash == repo.snapshot.indexHash
-    else { throw NSError(domain: "ReviewProbe", code: 4, userInfo: [NSLocalizedDescriptionKey: "External edit did not invalidate reading/scroll"]) }
+    else {
+      throw NSError(
+        domain: "ReviewProbe", code: 4,
+        userInfo: [NSLocalizedDescriptionKey: "External edit did not invalidate reading/scroll"])
+    }
     // Fault-inject only the synthetic original's config. A refused status must
     // keep the existing mounted diff readable without authorizing a write.
     if let original = store.workspace?.repositories.first(where: { $0.id == selection.repoId }),
       let sibling = store.workspace?.repositories.first(where: { $0.id != selection.repoId }),
-      let mounted = diffScroll(in: view) {
+      let mounted = diffScroll(in: view)
+    {
       let config = URL(fileURLWithPath: original.path).appendingPathComponent(".git/config")
       let saved = try Data(contentsOf: config)
       defer { try? saved.write(to: config, options: .atomic) }
       mounted.contentView.scroll(to: NSPoint(x: 0, y: 180))
       mounted.reflectScrolledClipView(mounted.contentView)
-      NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: mounted)
+      NotificationCenter.default.post(
+        name: NSScrollView.didEndLiveScrollNotification, object: mounted)
       let y = mounted.contentView.bounds.minY
       let rendered = store.diff?.contentIdentity
-      try Data((String(decoding: saved, as: UTF8.self) + "\n[core]\nworktree = \(sibling.path)\n").utf8).write(to: config, options: .atomic)
-      await store.refresh(); try await Task.sleep(for: .milliseconds(200))
+      try Data(
+        (String(decoding: saved, as: UTF8.self) + "\n[core]\nworktree = \(sibling.path)\n").utf8
+      ).write(to: config, options: .atomic)
+      await store.refresh()
+      try await Task.sleep(for: .milliseconds(200))
       view.layoutSubtreeIfNeeded()
       guard store.selectionCheckFailed, !store.canEdit, store.diff?.contentIdentity == rendered,
         diffScroll(in: view) === mounted, abs(mounted.contentView.bounds.minY - y) < 2
-      else { throw NSError(domain: "ReviewProbe", code: 5, userInfo: [NSLocalizedDescriptionKey: "Failed validation unmounted the cached read-only diff"]) }
-      guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw CocoaError(.fileWriteUnknown) }
+      else {
+        throw NSError(
+          domain: "ReviewProbe", code: 5,
+          userInfo: [
+            NSLocalizedDescriptionKey: "Failed validation unmounted the cached read-only diff"
+          ])
+      }
+      guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        throw CocoaError(.fileWriteUnknown)
+      }
       view.cacheDisplay(in: view.bounds, to: bitmap)
-      let failureImage = URL(fileURLWithPath: CommandLine.arguments[2]).deletingPathExtension().appendingPathExtension("validation-failed.png")
-      guard let failurePNG = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+      let failureImage = URL(fileURLWithPath: CommandLine.arguments[2]).deletingPathExtension()
+        .appendingPathExtension("validation-failed.png")
+      guard let failurePNG = bitmap.representation(using: .png, properties: [:]) else {
+        throw CocoaError(.fileWriteUnknown)
+      }
       try failurePNG.write(to: failureImage)
       try saved.write(to: config, options: .atomic)
-      await store.refresh(); try await Task.sleep(for: .milliseconds(100))
-      guard store.canEdit, !store.selectionCheckFailed else { throw CocoaError(.validationMissingMandatoryProperty) }
-    } else { throw CocoaError(.validationMissingMandatoryProperty) }
-    print("Verified mounted diff scroll restoration across folders/docking, reading checkpoints, unrelated edits, own-file invalidation, unchanged Git HEAD/index, snapshot-bound selected-hunk handoff and cached read-only diff continuity through validation failure/recovery")
+      await store.refresh()
+      try await Task.sleep(for: .milliseconds(100))
+      guard store.canEdit, !store.selectionCheckFailed else {
+        throw CocoaError(.validationMissingMandatoryProperty)
+      }
+    } else {
+      throw CocoaError(.validationMissingMandatoryProperty)
+    }
+    print(
+      "Verified mounted diff scroll restoration across folders/docking, reading checkpoints, unrelated edits, own-file invalidation, unchanged Git HEAD/index, snapshot-bound selected-hunk handoff and cached read-only diff continuity through validation failure/recovery"
+    )
   }
 
   @MainActor private static func verifyPreparationReadiness(_ store: WorkbenchStore) async throws {
@@ -492,7 +635,246 @@ struct NativePreview {
     }
     store.select(initial)
     try await waitForSelection(store)
-    print("Verified unfinished task is read-only while original folder and Ready sibling stay editable; snapshot preserved")
+    print(
+      "Verified unfinished task is read-only while original folder and Ready sibling stay editable; snapshot preserved"
+    )
+  }
+
+  @MainActor private static func settle(_ view: NSView) async throws {
+    // Switching navigation rebuilds the outer container before its dock canvas receives
+    // the new size. An offscreen host needs multiple layout/run-loop passes.
+    for _ in 0..<3 {
+      view.needsLayout = true
+      view.layoutSubtreeIfNeeded()
+      if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+      }
+      try await Task.sleep(for: .milliseconds(80))
+    }
+  }
+
+  @MainActor private static func seedSavedLayouts(_ layout: LayoutPreferences) throws -> (
+    UUID, UUID
+  ) {
+    let original = layout.configuration
+    let review = try layout.saveCurrentLayout(named: "나의 검토")
+    layout.apply(.tracks)
+    layout.update { $0.splitDiff = !original.splitDiff }
+    layout.showPane(.branches)
+    let branches = try layout.saveCurrentLayout(named: "브랜치 살펴보기")
+    layout.applySavedLayout(review)
+    return (review, branches)
+  }
+
+  @MainActor private static func verifyPersonalization(
+    _ store: WorkbenchStore, layout: LayoutPreferences, reading: ReadingPreferences,
+    presentation: DiffPresentationModel, drag: DockDragSession, defaults: UserDefaults,
+    view: NSView, socket: String, requestedLayout: LayoutConfiguration,
+    focusPrevious: LayoutConfiguration
+  ) async throws {
+    try requireSyntheticFixture(store)
+    guard let selection = store.selection, let diff = store.diff, !store.selectedFile.isEmpty,
+      !store.isViewingStash
+    else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "A mounted current-file review is required"])
+    }
+    let requestedReading = reading.configuration
+    let originalDraft = store.commitMessage
+    let originalFilter = presentation.onlyChangedHunks
+    store.commitMessage = "개인 화면 구성 검증 중인 커밋 초안"
+    let draft = store.commitMessage
+    let file = store.selectedFile
+    let staged = store.staged
+    let stash = store.selectedStashOID
+    let snapshot = store.repository?.snapshotHash
+    let appearance = layout.appearance
+    func preserved(_ step: String) throws {
+      guard store.selection == selection, store.selectedFile == file, store.staged == staged,
+        store.selectedStashOID == stash, store.commitMessage == draft,
+        store.repository?.snapshotHash == snapshot, store.diff?.text == diff.text,
+        store.diff?.contentIdentity == diff.contentIdentity,
+        store.diff?.snapshotHash == diff.snapshotHash, presentation.onlyChangedHunks,
+        layout.appearance == appearance
+      else {
+        throw NSError(
+          domain: "PersonalizationProbe", code: 2,
+          userInfo: [NSLocalizedDescriptionKey: "Review identity or draft changed during \(step)"])
+      }
+    }
+    var params: [String: JSONValue] = ["repo_id": .string(selection.repoId)]
+    if let operation = selection.opId { params["op_id"] = .string(operation) }
+    let client = ServiceClient(socketPath: socket)
+    let selectedBefore: RepositoryStatus = try await client.call("get_repo_status", params: params)
+    let originalParams: [String: JSONValue] = ["repo_id": .string(selection.repoId)]
+    let originalBefore: RepositoryStatus = try await client.call(
+      "get_repo_status", params: originalParams)
+
+    // This balanced tree was established before mounting, so focus geometry is
+    // measured independently of later repository-navigation container changes.
+    try await settle(view)
+    presentation.onlyChangedHunks = true
+    let baseline = layout.configuration
+    guard layout.configuration == baseline, let before = drag.frames[.diff],
+      before.width > 100, before.height > 100
+    else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 11,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Applying baseline layout did not produce mounted Diff geometry"
+        ])
+    }
+    let encodedBefore = defaults.data(forKey: "workbench.layout.v1")
+    let undoAvailable = layout.canUndoDock
+    layout.focusPane(.diff)
+    try await settle(view)
+    guard let focused = drag.frames[.diff], layout.focusedPane == .diff,
+      focused.width > before.width + 30 || focused.height > before.height + 30,
+      layout.configuration == baseline,
+      defaults.data(forKey: "workbench.layout.v1") == encodedBefore,
+      layout.canUndoDock == undoAvailable,
+      drag.frames.keys.allSatisfy({ $0 == .diff })
+    else {
+      let details = drag.frames.map { "\($0.key.rawValue)=\($0.value)" }.sorted().joined(
+        separator: "; ")
+      throw NSError(
+        domain: "PersonalizationProbe", code: 4,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Mounted focus geometry failed: before=\(before), focused=\(String(describing: drag.frames[.diff])), pane=\(String(describing: layout.focusedPane)), configuration=\(layout.configuration == baseline), bytes=\(defaults.data(forKey: "workbench.layout.v1") == encodedBefore), undo=\(layout.canUndoDock == undoAvailable); \(details)"
+        ])
+    }
+    try preserved("mounted focus")
+    layout.restorePaneLayout()
+    try await settle(view)
+    guard let restored = drag.frames[.diff], abs(restored.width - before.width) < 1,
+      abs(restored.height - before.height) < 1,
+      layout.configuration == baseline,
+      defaults.data(forKey: "workbench.layout.v1") == encodedBefore,
+      layout.canUndoDock == undoAvailable
+    else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 12,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Focus restore mismatch: before=\(before), restored=\(String(describing: drag.frames[.diff])), configuration=\(layout.configuration == baseline), bytes=\(defaults.data(forKey: "workbench.layout.v1") == encodedBefore), undo=\(layout.canUndoDock == undoAvailable)"
+        ])
+    }
+    try preserved("focus restore")
+    // The previous full configuration is a behavioral check of unchanged undo history.
+    layout.undoDock()
+    try await settle(view)
+    guard layout.configuration == focusPrevious else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 5,
+        userInfo: [NSLocalizedDescriptionKey: "Temporary focus added or consumed an undo step"])
+    }
+    layout.apply(.balanced)
+    let ids = try seedSavedLayouts(layout)
+    try await settle(view)
+    try preserved("saved-layout creation")
+    guard let alternate = layout.savedLayouts.first(where: { $0.id == ids.1 })?.configuration,
+      alternate.navigation != baseline.navigation, alternate.splitDiff != baseline.splitDiff,
+      alternate.dock?.sameArrangement(as: baseline.dock!) == false,
+      layout.dockLayout.sameArrangement(as: baseline.dock!),
+      layout.configuration.navigation == baseline.navigation,
+      layout.configuration.splitDiff == baseline.splitDiff
+    else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 10,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Saved layout setup did not preserve the baseline configuration"
+        ])
+    }
+    layout.undoDock()
+    try await settle(view)
+    guard layout.configuration == alternate else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 3,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Undo failed to restore navigation, Diff style and dock together"
+        ])
+    }
+    try preserved("full configuration undo")
+    layout.applySavedLayout(ids.0)
+    try await settle(view)
+    try await dock(.diff, beside: .files, edge: .bottom, layout: layout, drag: drag)
+    try preserved("moving Diff")
+    layout.apply(.classic)
+    try await settle(view)
+    try preserved("preset application")
+    layout.applySavedLayout(ids.1)
+    try await settle(view)
+    try preserved("saved layout application with different repository navigation")
+    guard LayoutPreferences(defaults: defaults).savedLayouts == layout.savedLayouts else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 13,
+        userInfo: [NSLocalizedDescriptionKey: "Saved layout library failed persistence round trip"])
+    }
+    let beforeReadingChange = layout.configuration
+    reading.setCodeSize(requestedReading.codeSize == 18 ? 16 : 18)
+    reading.setDensity(requestedReading.density == .compact ? .comfortable : .compact)
+    try await settle(view)
+    guard layout.configuration == beforeReadingChange,
+      ReadingPreferences(defaults: defaults).configuration == reading.configuration
+    else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 14,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Reading preferences changed the arrangement or failed persistence"
+        ])
+    }
+    try preserved("independent reading preferences")
+
+    let selectedAfter: RepositoryStatus = try await client.call("get_repo_status", params: params)
+    let originalAfter: RepositoryStatus = try await client.call(
+      "get_repo_status", params: originalParams)
+    guard selectedBefore.snapshotHash == selectedAfter.snapshotHash,
+      originalBefore.snapshotHash == originalAfter.snapshotHash
+    else {
+      throw NSError(
+        domain: "PersonalizationProbe", code: 6,
+        userInfo: [
+          NSLocalizedDescriptionKey: "Git snapshot changed during presentation-only operations"
+        ])
+    }
+    layout.update { $0 = requestedLayout }
+    reading.setCodeSize(requestedReading.codeSize)
+    reading.setDensity(requestedReading.density)
+    presentation.onlyChangedHunks = originalFilter
+    store.commitMessage = originalDraft
+    try await settle(view)
+    func frame(_ rect: CGRect) -> [String: Double] {
+      ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
+    }
+    let report: [String: Any] = [
+      "sameMountedRoot": true, "namedLayouts": layout.savedLayouts.map(\.name),
+      "fullConfigurationUndo": true, "focusPersistenceAndUndoUnchanged": true,
+      "focusGeometry": [
+        "before": frame(before), "focused": frame(focused), "restored": frame(restored),
+      ],
+      "reviewIdentityPreserved": true, "draftAndDiffPreserved": true,
+      "filterPreservedAcrossFocusMovePresetAndSavedLayout": true,
+      "readingPreferencesIndependent": true, "hiddenSiblingDropTargetsExcluded": true,
+      "selectedSnapshotBefore": selectedBefore.snapshotHash,
+      "selectedSnapshotAfter": selectedAfter.snapshotHash,
+      "originalSnapshotBefore": originalBefore.snapshotHash,
+      "originalSnapshotAfter": originalAfter.snapshotHash,
+      "scope":
+        "Own mounted SwiftUI root and actual presentation APIs; independent Git status reads before/after. No OS input, zero-RPC, VoiceOver or performance claim.",
+    ]
+    if let path = ProcessInfo.processInfo.environment["WORKBENCH_PREVIEW_PERSONALIZATION_REPORT"] {
+      try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        .write(to: URL(fileURLWithPath: path))
+    }
+    print(
+      "Verified same-root named layouts/full undo, actual focus geometry/restore, persistent review filter/draft/Diff identity and unchanged selected/original Git snapshots"
+    )
   }
 
   @MainActor private static func dock(

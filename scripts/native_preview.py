@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render our own native content view in real, newly generated Git states."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,9 +34,16 @@ def main():
     parser.add_argument("--graph", choices=["top", "bottom", "hidden"])
     parser.add_argument("--verify-layout", action="store_true", help="verify persistence and unchanged live Git review across layout changes")
     parser.add_argument("--layout-settings", action="store_true", help="render the actual layout settings content")
+    parser.add_argument("--layout-settings-section", choices=["layouts", "panels", "reading"], default="layouts")
+    parser.add_argument("--verify-personalization", action="store_true", help="verify same-root saved layouts, focus geometry, reading state and unchanged Git snapshots")
+    parser.add_argument("--focus-pane", choices=["files", "diff", "graph", "commit", "stash", "details", "branches"])
+    parser.add_argument("--code-size", type=int, choices=range(11, 21), default=13)
+    parser.add_argument("--compact", action="store_true", help="use compact code rows and file-list spacing")
     parser.add_argument("--dock-scene", choices=["default", "free", "tabs", "drag-preview", "branches", "empty"], default="default")
     parser.add_argument("--verify-docking", action="store_true", help="exercise the real dock drag controller using mounted pane geometry")
     args = parser.parse_args()
+    if args.verify_personalization and (args.layout_settings or (args.branches and args.dock_scene != "branches") or args.scene in {"clean", "waiting"} or args.stash_detail):
+        parser.error("--verify-personalization requires the mounted current-changes workspace (not settings, standalone branches, clean/waiting, or stash detail)")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     binary = ROOT / "target/debug/workbench"
     renderer = args.renderer
@@ -55,7 +63,7 @@ def main():
                "Views/LoginView.swift": "struct LoginView {\n    let title = \"Sign in\"\n}\n",
                "Tests/SessionTests.swift": "// Synthetic test fixture\nlet expectedTitle = \"Sign in\"\n",
                "README.md": "# Synthetic login project\n\nLogin screen development.\n"}
-    if args.verify_review_continuity:
+    if args.verify_review_continuity or args.verify_personalization:
         # Tracked context separates the first logical change from the long tail,
         # so the probe can prove handoff/filtering preserve hunk identity.
         samples["Sources/Session.swift"] += "".join(f"// Baseline context {i}\n" for i in range(40))
@@ -111,7 +119,7 @@ def main():
                 (selected / "Config/Version.xcconfig").write_bytes(version)
             for name, content in samples.items():
                 (selected / name).write_text(content.replace("false", "true").replace("Sign in", "Continue") + "// Review fixture change\n")
-            if args.verify_review_continuity:
+            if args.verify_review_continuity or args.verify_personalization:
                 long_file = selected / "Sources/Session.swift"
                 long_file.write_text(long_file.read_text() + "".join(f"// Synthetic review line {i}\n" for i in range(160)))
             (selected / "Notes").mkdir()
@@ -141,13 +149,19 @@ def main():
         environment["WORKBENCH_PREVIEW_GRAPH"] = args.graph or ""
         environment["WORKBENCH_PREVIEW_VERIFY_LAYOUT"] = "1" if args.verify_layout else "0"
         environment["WORKBENCH_PREVIEW_LAYOUT_SETTINGS"] = "1" if args.layout_settings else "0"
+        environment["WORKBENCH_PREVIEW_LAYOUT_SETTINGS_SECTION"] = args.layout_settings_section
+        environment["WORKBENCH_PREVIEW_VERIFY_PERSONALIZATION"] = "1" if args.verify_personalization else "0"
+        environment["WORKBENCH_PREVIEW_PERSONALIZATION_REPORT"] = str(args.output.resolve().with_suffix(".personalization.json"))
+        environment["WORKBENCH_PREVIEW_FOCUS_PANE"] = args.focus_pane or ""
+        environment["WORKBENCH_PREVIEW_CODE_SIZE"] = str(args.code_size)
+        environment["WORKBENCH_PREVIEW_COMPACT"] = "1" if args.compact else "0"
         environment["WORKBENCH_PREVIEW_DOCK_SCENE"] = args.dock_scene
         environment["WORKBENCH_PREVIEW_VERIFY_DOCKING"] = "1" if args.verify_docking else "0"
         if args.scene == "staged":
             environment["WORKBENCH_PREVIEW_STAGED"] = "1"
         if args.inspector != "auto":
             environment["WORKBENCH_PREVIEW_INSPECTOR"] = "1" if args.inspector == "show" else "0"
-        subprocess.run([str(renderer), str(socket), str(args.output.resolve()), args.appearance, str(args.width), str(args.height)], check=True, timeout=30, env=environment)
+        subprocess.run([str(renderer), str(socket), str(args.output.resolve()), args.appearance, str(args.width), str(args.height)], check=True, timeout=60 if args.verify_personalization else 30, env=environment)
         stashes = rpc("list_stashes", repo_id="ios-app")
         report = {"image": str(args.output.resolve()), "fixture": str(fixture), "scene": args.scene, "file_count": len(files), "staged_count": sum(f["index"] not in [" ", "?"] for f in files), "stash_count": len(stashes), "stash_detail": args.stash_detail, "status": op["status"], "repos": [{"id": r["plan"]["repo_id"], "state": r["state"], "attempts": r["attempts"]} for r in op["repos"]]}
         report.update(original_folder=args.original, switch_cache_verified=args.verify_switch_cache, branch_browser=args.branches and args.dock_scene != "branches", review_continuity_verified=args.verify_review_continuity)
@@ -155,6 +169,17 @@ def main():
         report.update(dock_scene=args.dock_scene, docking_verified=args.verify_docking)
         report.update(preparation_readiness_verified=args.verify_preparation_readiness)
         report.update(task_context_verified=args.verify_task_context)
+        report.update(focus_pane=args.focus_pane, code_size=args.code_size, compact=args.compact,
+                      layout_settings_section=args.layout_settings_section,
+                      personalization_verified=args.verify_personalization)
+        report["renderer_provenance"] = {"path": str(renderer.resolve()), "sha256": hashlib.sha256(renderer.read_bytes()).hexdigest(),
+                                         "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                                         "source_tracked_changes": subprocess.check_output(["git", "diff", "--name-only"], cwd=ROOT, text=True).splitlines()}
+        forwarded_keys = ["WORKBENCH_PREVIEW_VERIFY_PERSONALIZATION", "WORKBENCH_PREVIEW_FOCUS_PANE", "WORKBENCH_PREVIEW_CODE_SIZE",
+                          "WORKBENCH_PREVIEW_COMPACT", "WORKBENCH_PREVIEW_LAYOUT_SETTINGS_SECTION", "WORKBENCH_PREVIEW_PERSONALIZATION_REPORT"]
+        report["personalization_environment"] = {key: environment[key] for key in forwarded_keys}
+        if args.verify_personalization:
+            report["personalization_verification"] = json.loads(args.output.with_suffix(".personalization.json").read_text())
         if args.branches:
             branches = rpc("list_branches", repo_id="ios-app", op_id=op["id"])
             report.update(local_branch_count=sum(not b["is_remote"] for b in branches), remote_branch_count=sum(b["is_remote"] for b in branches))

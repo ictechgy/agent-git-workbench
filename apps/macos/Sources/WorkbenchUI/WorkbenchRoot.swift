@@ -5,13 +5,19 @@ import WorkbenchProtocol
 public struct WorkbenchRoot: View {
   @ObservedObject private var store: WorkbenchStore
   @StateObject private var layout: LayoutPreferences
+  @StateObject private var reading: ReadingPreferences
+  @StateObject private var diffPresentation: DiffPresentationModel
+  @StateObject private var branchBrowser = BranchBrowserModel()
   @State private var drag: DockDragSession
   @State private var showErrorDetails = false
   public init(
-    store: WorkbenchStore, layout: LayoutPreferences? = nil, dockSession: DockDragSession? = nil
+    store: WorkbenchStore, layout: LayoutPreferences? = nil, dockSession: DockDragSession? = nil,
+    reading: ReadingPreferences? = nil, diffPresentation: DiffPresentationModel? = nil
   ) {
     self.store = store
     _layout = StateObject(wrappedValue: layout ?? LayoutPreferences())
+    _reading = StateObject(wrappedValue: reading ?? ReadingPreferences())
+    _diffPresentation = StateObject(wrappedValue: diffPresentation ?? DiffPresentationModel())
     _drag = State(initialValue: dockSession ?? DockDragSession())
   }
 
@@ -21,20 +27,28 @@ public struct WorkbenchRoot: View {
       VStack(spacing: 0) {
         ForEach(store.submissionWarnings) { warning in
           HStack(alignment: .top) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(WorkbenchTheme.warning)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(
+              WorkbenchTheme.warning)
             VStack(alignment: .leading, spacing: 4) {
-              Text("\(warning.workspaceTitle) · 실행 여부 확인 필요").font(.system(size: 12, weight: .semibold))
+              Text("\(warning.workspaceTitle) · 실행 여부 확인 필요").font(
+                .system(size: 12, weight: .semibold))
               Text(warning.message).font(.system(size: 12))
               Text(warning.workspacePath).font(.system(size: 11)).foregroundStyle(.secondary)
             }.textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-            Button { store.dismissSubmissionWarning(warning.id) } label: { Image(systemName: "xmark") }
-              .buttonStyle(.plain).help("실행 여부 안내 닫기").accessibilityLabel("\(warning.workspaceTitle) 실행 여부 안내 닫기")
+            Button {
+              store.dismissSubmissionWarning(warning.id)
+            } label: {
+              Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain).help("실행 여부 안내 닫기").accessibilityLabel(
+              "\(warning.workspaceTitle) 실행 여부 안내 닫기")
           }.padding(12).background(WorkbenchTheme.warning.opacity(0.1))
           Divider()
         }
         if let error = store.error {
           HStack(alignment: .top) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(WorkbenchTheme.warning)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(
+              WorkbenchTheme.warning)
             VStack(alignment: .leading, spacing: 6) {
               Text(error).font(.system(size: 12)).textSelection(.enabled)
               if let details = store.errorDetails, details != error {
@@ -56,7 +70,7 @@ public struct WorkbenchRoot: View {
             .overlay(alignment: .leading) {
               Rectangle().fill(WorkbenchTheme.warning).frame(width: 3).allowsHitTesting(false)
             }.accessibilityElement(
-            children: .contain)
+              children: .contain)
           Divider()
         }
         if store.workspace == nil || store.showingWelcome {
@@ -68,18 +82,20 @@ public struct WorkbenchRoot: View {
               get: { inspectorVisible },
               set: { value in
                 if value { layout.showPane(.commit) } else { layout.hidePane(.commit) }
-              }), layout: layout)
+              }), layout: layout, reading: reading)
           if layout.configuration.navigation == .tracks {
             RepositoryTracks(store: store) {
               ReviewLayout(
-                store: store, layout: layout, drag: drag)
+                store: store, layout: layout, drag: drag,
+                diffPresentation: diffPresentation, branchBrowser: branchBrowser)
             }.padding(.horizontal, 14).padding(.bottom, 14)
               .background(WorkbenchTheme.chrome)
           } else {
             VStack(spacing: 0) {
               RepositoryTabs(store: store)
               ReviewLayout(
-                store: store, layout: layout, drag: drag)
+                store: store, layout: layout, drag: drag,
+                diffPresentation: diffPresentation, branchBrowser: branchBrowser)
             }
           }
         }
@@ -88,13 +104,19 @@ public struct WorkbenchRoot: View {
     .background(WorkbenchTheme.chrome)
     .foregroundStyle(WorkbenchTheme.primaryText)
     .tint(WorkbenchTheme.accent)
-    .preferredColorScheme(layout.appearance == .system ? nil : layout.appearance == .dark ? .dark : .light)
+    .environment(\.riverReading, reading.configuration)
+    .preferredColorScheme(
+      layout.appearance == .system ? nil : layout.appearance == .dark ? .dark : .light
+    )
     .navigationTitle(store.showingWelcome ? "River" : store.taskTitle)
     .onAppear { store.splitDiff = layout.configuration.splitDiff }
     .onChange(of: layout.configuration.splitDiff) { _, value in store.splitDiff = value }
     .onChange(of: store.splitDiff) { _, value in layout.update { $0.splitDiff = value } }
+    .onChange(of: store.currentReviewID) { _, _ in diffPresentation.onlyChangedHunks = false }
     .sheet(isPresented: $store.showCloneSheet) { CloneRepositorySheet(store: store) }
-    .sheet(isPresented: $store.showTaskSheet) { NewTaskSheet(store: store).id(store.workspaceSession) }
+    .sheet(isPresented: $store.showTaskSheet) {
+      NewTaskSheet(store: store).id(store.workspaceSession)
+    }
     .sheet(isPresented: $store.showBranches) {
       BranchesView(store: store) { store.showBranches = false }
         .frame(minWidth: 900, idealWidth: 1100, minHeight: 580, idealHeight: 700)

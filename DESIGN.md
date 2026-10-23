@@ -6,6 +6,7 @@
 - **Current direction:** River Clear. The product owner approved the two-column Focus arrangement and fresh water-colored palette after a Claude/Codex design discussion. The native implementation uses these as the starting arrangement and appearance for new preferences.
 - **Primary surfaces:** Native macOS welcome screen, Git review workspace, task planning/preparation, and task information.
 - **Evidence:** [Product scope](README.md), [River Clear rules](docs/design/river-clear.md), [familiar Git layouts](docs/design/familiar-git-layouts.md), and [current limitations](docs/limitations.md). Implementation lives in [WorkbenchUI](apps/macos/Sources/WorkbenchUI), particularly `WorkbenchTheme`, `LayoutPreferences`, `DockWorkspace`, `WorkspaceContextHeader`, and `FolderLocationControl`.
+- **Personalization extension:** Actual Claude, Devin and Grok design advice and peer exchanges informed the [personal workspace contract](docs/customization.md). Named full-configuration snapshots were chosen deliberately; advisors differed on whether Diff style belongs in them. No claim of provider implementation approval or measured performance follows from design advice.
 - This document is the active design contract. A design proposal or advisor suggestion becomes a product rule only after adoption and implementation; historical discussion does not override current behavior.
 
 ## Brand
@@ -38,6 +39,8 @@
 - **Focus** starts with files and broad unified Diff. **Balanced** adds one utility group containing commit, Stash, and task information. Classic, Code Review, and Repository Tracks remain alternative starting arrangements.
 - Every files, Diff, graph, branches, commit, Stash, or task-information pane remains independently dockable. Opening an existing pane selects it. Opening a missing commit/Stash/details pane reuses an existing utility group; otherwise it opens beside Diff. History opens below Diff and branches alongside Diff as a tab.
 - A preset initializes a tree; it does not constrain later placement. Save nested splits, ratios, active tabs, hidden panes, and diff style. Preserve existing saved layouts. Resizing does not silently rearrange or hide panes.
+- **Personal layouts:** Keep the current arrangement automatically, and let users explicitly save named full-layout snapshots for different jobs. Switching a saved layout or factory arrangement is reversible and preserves repository selection, review state, and drafts. Appearance and reading preferences remain independent. Existing `workbench.layout.v1` preferences must continue to load.
+- **Pane enlargement:** A pane can temporarily fill the work area with an explicit return action. Retain the complete dock tree and its ratios rather than hiding its siblings or overwriting saved preferences. This is distinct from the two-pane Focus starting arrangement.
 - Stash selection is read-only and replaces the file/Diff content; explicit return restores current changes. Branch selection reads history without checkout. Both use real Git data.
 - Task information records purpose, completion criteria, references, notes, checks, and reports. App-run observations are distinct from human/AI reports. Hunk requests and handoff drafts use explicit preview/copy; the app does not invoke providers.
 - **Remote operations:** A named `원격` disclosure sits beside the current-folder context in both tab and repository-track navigation. Keep remote selection, endpoint details, fetched branches, synchronization, and URL management in that disclosure; do not add a permanent action row or pane. Clone is a secondary welcome/menu action with one sheet.
@@ -55,6 +58,7 @@
 - **Color:** Clear Shallows (`맑은 물`) is the default light appearance; Clear Deep (`깊은 물`) and system appearance are independently saved choices. [Exact tokens and contrast](docs/design/river-clear.md#color-tokens) live in `WorkbenchTheme`.
 - **Surfaces:** Water-colored chrome/navigation, opaque code canvas, and selection. Panel reuses navigation; elevated surfaces reuse canvas. Brand amber/lilac belong to the icon and welcome signature, not status.
 - **Typography:** System sans for controls and metadata; monospace for code, paths, OIDs, and refs. Normal controls use 12–13pt, task title 15pt. Small secondary metadata must not replace readable primary labels.
+- **Reading controls:** Persist code size and comfortable/compact row spacing separately from layouts. Derive diff text, gutters, and total hunk height from the same metrics so larger text cannot clip. Density must retain source signs, file identity, paths, and safety notices.
 - **Rhythm:** 4pt spacing units, two 48pt normal header rows, modest pane padding, subtle dividers, and restrained rounded controls. Preserve room for code rather than adding decorative cards.
 - **Motion:** Focus and state feedback only. Respect Reduce Motion and Reduce Transparency. Code surfaces remain opaque.
 - **Imagery:** The approved raster app icon, SF Symbols, and native Git graph edges derived from actual parent OIDs. Task grouping must not masquerade as Git ancestry.
@@ -63,6 +67,7 @@
 
 - Reuse `WelcomeView`, `WorkspaceContextHeader`, `RepositoryTabs`/`RepositoryTracks`, `CurrentFolderContext`, `DockWorkspace`, `WorkspaceSidebar`, `DiffWorkspace`, `CommitComposer`, `TaskInspector`, `TaskContextView`, `BranchesView`, and `NewTaskSheet`.
 - Pane title rows provide drag, placement, and hide controls. Normal body content should not repeat the pane title. Required context, filters, counts, and read-only state may remain in body toolbars.
+- Personalization uses one named screen-configuration entry point with progressively disclosed layout, panel, and reading controls. Use accurate miniatures of real dock trees instead of indistinguishable preset symbols. Keep all panels accessible from a native View menu and preserve named access to Stash and branches.
 - Reuse theme tokens and shared `ChromeButtonStyle`/`PrimaryActionStyle`. Hunk staging is a quiet outlined action; its availability and warning semantics remain unchanged.
 - Keep the commit target and staged count in the action. Show hook/signing behavior nearby and explicitly warn that untracked files are excluded.
 - **Ownership:** `WorkbenchUI` owns native views/tokens and presentation state; `WorkbenchProtocol` owns typed wire models; `WorkbenchRuntime` owns engine startup and local registration. Rust owns Git operations and authorization.

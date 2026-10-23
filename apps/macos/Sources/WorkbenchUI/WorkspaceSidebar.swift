@@ -2,6 +2,7 @@ import SwiftUI
 import WorkbenchProtocol
 
 struct WorkspaceSidebar: View {
+  @Environment(\.riverReading) private var reading
   @ObservedObject var store: WorkbenchStore
   var body: some View {
     VStack(spacing: 0) {
@@ -45,7 +46,7 @@ struct WorkspaceSidebar: View {
         Spacer()
       } else {
         ScrollView {
-          LazyVStack(spacing: 3) {
+          LazyVStack(spacing: reading.density == .comfortable ? 3 : 1) {
             ForEach(store.displayedFiles) { file in fileRow(file) }
           }.padding(.horizontal, 8).padding(.bottom, 12)
         }
@@ -100,7 +101,7 @@ struct WorkspaceSidebar: View {
               .help(review.label).accessibilityLabel(review.label)
           }
         }
-      }.padding(10).contentShape(Rectangle())
+      }.padding(.horizontal, 10).padding(.vertical, reading.listVerticalPadding).contentShape(Rectangle())
     }.buttonStyle(.plain)
       .background(
         selected ? WorkbenchTheme.selection : .clear,

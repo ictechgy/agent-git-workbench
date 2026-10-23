@@ -16,7 +16,7 @@ A native macOS Git app for reviewing work across repositories and worktrees.
 
 ## macOS에 설치하기
 
-**[Apple Silicon용 River 0.1.0-alpha.3 다운로드](https://github.com/ictechgy/river/releases/download/v0.1.0-alpha.3/River-0.1.0-alpha.3-macos-arm64.dmg)** · [릴리스 정보와 체크섬](https://github.com/ictechgy/river/releases/tag/v0.1.0-alpha.3)
+**[Apple Silicon용 River 0.1.0-alpha.4 다운로드](https://github.com/ictechgy/river/releases/download/v0.1.0-alpha.4/River-0.1.0-alpha.4-macos-arm64.dmg)** · [릴리스 정보와 체크섬](https://github.com/ictechgy/river/releases/tag/v0.1.0-alpha.4)
 
 - **Apple Silicon(arm64) 전용입니다.** 이번 릴리스에는 Intel 빌드가 없습니다.
 - **선언된 지원 대상은 macOS 14 이상입니다.** 실행 검증은 macOS 27.0.1에서만 했으며, 이전 버전에서의 호환성은 아직 확인하지 않았습니다.
@@ -27,7 +27,7 @@ A native macOS Git app for reviewing work across repositories and worktrees.
 3. River 디스크 이미지를 추출한 뒤 **응용 프로그램** 폴더에서 **River**를 엽니다.
 4. **예제로 먼저 둘러보기**를 선택해 합성 저장소로 사용해 본 뒤 자신의 프로젝트를 여세요.
 
-앱·내장 엔진·DMG의 Developer ID 서명을 검증했습니다. 이번 알파는 **Apple 공증(notarization)을 받지 않아** 첫 실행이 차단될 수 있습니다. 자세한 검증 상태는 [릴리스 정보](docs/releases/v0.1.0-alpha.3.md)를 확인하세요.
+앱·내장 엔진·DMG의 Developer ID 서명을 검증했습니다. 이번 알파는 **Apple 공증(notarization)을 받지 않아** 첫 실행이 차단될 수 있습니다. 자세한 검증 상태는 [릴리스 정보](docs/releases/v0.1.0-alpha.4.md)를 확인하세요.
 
 macOS가 개발자를 확인할 수 없거나 앱을 검사할 수 없다는 이유로 실행을 막으면 릴리스 상태와 다운로드 출처를 먼저 확인하세요. 계속 진행하기로 했다면 River 실행을 한 번 시도한 뒤 **시스템 설정 → 개인정보 보호 및 보안 → 확인 없이 열기(Open Anyway)**에서 허용하고 **열기**를 확인합니다. 자세한 절차는 [Apple 안내](https://support.apple.com/en-us/102445)를 따르세요.
 
@@ -46,10 +46,19 @@ macOS가 개발자를 확인할 수 없거나 앱을 검사할 수 없다는 이
 | 브랜치와 Stash | 로컬·원격 추적 브랜치 검색과 최근 기록(마지막 fetch 기준), 연결된 폴더 표시, Stash 파일·Diff 읽기 전용 조회 |
 | 원격 Git | SSH/HTTPS 원격 URL 관리, clone, 브랜치 fetch, 빨리 감기 pull, 단일 브랜치 push. GitHub·GitLab·Bitbucket·자체 Git 서버의 공통 Git 프로토콜을 사용합니다. |
 | 전환 상태 유지 | 같은 작업공간에서 파일·Diff·스크롤을 복원하고 Git 상태 재확인. 커밋 초안은 앱 세션 동안, 개인 검토·스크롤은 현재 작업공간 세션 동안 유지 |
-| 자유로운 화면 구성 | 2열 집중·3열 균형 배치에서 시작해 모든 pane(패널)을 분할·이동·탭 결합·숨김. 배치는 다음 실행에도 복원하며, 밝은·어두운·시스템 색상은 배치와 별도로 저장 |
+| 자유로운 화면 구성 | 모든 패널을 분할·이동·탭 결합·숨김. 이름 있는 배치 최대 20개, 임시 패널 확대, 배치와 독립적인 코드 글자·간격·색상 설정 |
 | AI와 함께 검토 | 선택한 hunk의 수정 요청문과 인수인계 초안 복사, 작업 목적·완료 조건·검증 결과 기록 |
 
 앱이 AI 모델을 직접 호출하지는 않습니다. 복사한 요청문을 Claude·Codex·Grok 등 사용 중인 도구에 전달하는 방식입니다. AI나 사람이 적은 결과는 **보고**로 보관하며, 앱이 실제 실행한 검사 결과와 구분합니다.
+
+<details>
+<summary>내 배치와 읽기 설정 보기</summary>
+
+![River screen configuration and named layouts](docs/images/layout-customization.png)
+
+실제 배치 미리보기를 보며 이름으로 저장하고, 코드 글자·간격은 따로 설정합니다. [사용자 설정 안내](docs/customization.md).
+
+</details>
 
 <details>
 <summary>어두운 색상 보기</summary>
@@ -87,12 +96,14 @@ macOS가 개발자를 확인할 수 없거나 앱을 검사할 수 없다는 이
 - **위치부터 확인:** 저장소·브랜치·폴더 종류·폴더 이름을 계속 표시합니다. 폴더 버튼에서 전체 경로를 확인하고 Task의 작업용 폴더와 원래 프로젝트 폴더를 전환합니다. 준비 대기·실패 상태를 성공으로 표시하지 않습니다.
 - **검토 상태 유지:** 같은 작업공간에서 폴더를 오가면 최근 파일·Diff·스크롤 위치를 복원합니다. 저장한 작업 목적·완료 조건·검증 기록은 앱 기록(journal)에 남습니다. 커밋 초안은 현재 앱 세션에 한정하고, 개인 검토·스크롤 기록은 다른 작업공간으로 전환하거나 앱을 종료하면 사라집니다.
 - **검토에 집중:** 새 배치는 파일과 넓은 Diff로 시작합니다. 상단의 이름이 적힌 버튼으로 기록·전체 브랜치·Stash·커밋·작업 정보를 엽니다. 커밋·Stash·작업 정보는 이미 열린 보조 패널이 있으면 그 영역에 탭으로 모입니다.
-- **직접 배치:** pane 제목을 끌어 다른 pane의 좌·우·위·아래에 나누거나 중앙에 탭으로 합칩니다. **화면 구성**에서 집중·균형·클래식·코드 검토·저장소 트랙 배치, 패널 표시, 배치 되돌리기를 선택합니다. 기존에 저장한 배치는 유지하므로 새 기본 구성을 쓰려면 집중을 직접 선택하세요. 모든 배치는 이후 자유롭게 바꿀 수 있습니다.
+- **직접 배치:** pane 제목을 끌어 다른 pane의 좌·우·위·아래에 나누거나 중앙에 탭으로 합칩니다. **화면 구성**에서 집중·균형·클래식·코드 검토·저장소 트랙 배치, 패널 표시, 배치 되돌리기를 선택합니다. 기존에 저장한 배치는 유지하므로 새 기본 구성을 쓰려면 집중을 직접 선택하세요. 모든 배치는 이후 자유롭게 바꿀 수 있습니다. 실제 미리보기를 보며 내 배치를 저장하거나, 저장 배치를 바꾸지 않고 패널만 잠시 확대하세요. 메뉴 막대의 보기(View)에서도 배치와 단축키를 찾을 수 있습니다. [사용자 설정 안내](docs/customization.md)를 확인하세요.
 - **색상 선택:** 기본값은 밝은 **맑은 물**입니다. **화면 구성**에서 **깊은 물** 또는 **시스템 설정**으로 바꿀 수 있으며, 색상은 패널 배치와 별도로 저장합니다.
 - **원격 연결:** 현재 폴더 옆 **원격**에서 URL을 관리하고 브랜치를 동기화합니다. Pull·push는 실제 대상 확인 후 실행하며 clone은 시작 화면과 앱 메뉴에서 엽니다. 인증은 기존 SSH agent·기본 키·known-host 파일 또는 HTTPS용 Apple Git 키체인 helper를 사용합니다. 제공자 로그인·SSH 별칭·임의 helper는 포함하지 않습니다. 자세한 범위는 [원격 가이드](docs/remotes.md)를 확인하세요.
 - **검증과 보고 구분:** **공백 · 충돌 마커 검사**는 추적 파일과 스테이징의 `git diff --check`, Git 충돌·진행 상태를 검사합니다. 빌드·테스트 결과가 아니며 추적되지 않은 새 파일·서브모듈 내용은 검사 범위 밖입니다.
 
-`⌘O` 저장소 열기 · `⌘N` 새 작업 · `⌘R` 갱신 · `⌘⌥I` 커밋 패널 열기 · `⌘↩` 활성 커밋 패널에서 커밋 · `⌘⌥L` 화면 구성.
+추가 화면 단축키: `⌘⌥1`–`⌘⌥6` 패널 표시 전환 · `⌘⌥Z` 화면 구성 되돌리기 · `⌃⌘↩` Diff 확대/원래 배치. 코드 글자(11–20 pt)와 코드·파일 목록 간격은 저장 배치와 별도로 유지됩니다.
+
+`⌘O` 저장소 열기 · `⌘N` 새 작업 · `⌘R` 갱신 · `⌘⌥I` 커밋 패널 표시 전환 · `⌘↩` 활성 커밋 패널에서 커밋 · `⌘⌥L` 화면 구성.
 
 설정·최근 프로젝트·작업 기록(journal)은 `~/Library/Application Support/AgentGitWorkbench`에 저장합니다. 최근 메뉴는 최대 30개이며 기존 작업공간 등록은 별도로 찾습니다. 이 복원은 정상적으로 읽을 수 있는 등록을 기준으로 합니다.
 
@@ -104,7 +115,7 @@ macOS가 개발자를 확인할 수 없거나 앱을 검사할 수 없다는 이
 - **준비와 쓰기:** 원래 checkout을 바꾸지 않고 작업용 폴더를 준비합니다. source snapshot이나 신뢰 기준이 바뀌면 중단하며, 조용히 재계획하거나 reset/clean으로 복구하지 않습니다. Recipe는 OS 보안 sandbox가 아닙니다.
 - **표시와 자원:** 그래프·브랜치 기록은 최근 최대 80개 커밋, Diff 표시는 5,000줄·512 KiB로 제한합니다. 대형 저장소의 속도·메모리·에너지는 아직 계측하지 않았습니다.
 - **복구와 새로고침:** 준비 요청의 응답을 잃으면 앱 세션에 원래 프로젝트 안내가 남습니다. 작업을 반복하기 전에 해당 프로젝트의 작업 목록과 Git 상태를 확인해야 하며, 안내는 앱 재시작 뒤 복원되지 않습니다. Git 속성·Diff 설정을 바꾼 뒤에는 새로고침하세요. 이미 엔진에서 시작한 읽기는 클라이언트가 취소해도 계속될 수 있습니다.
-- **배포와 검증:** 현재 사전 릴리스 DMG는 Apple Silicon용입니다. 서명·notarization 상태는 [릴리스 정보](docs/releases/v0.1.0-alpha.3.md)를 확인하세요. Intel 빌드, macOS 14–26 실행, OS 입력 및 VoiceOver 검증은 완료하지 않았습니다.
+- **배포와 검증:** 현재 사전 릴리스 DMG는 Apple Silicon용입니다. 서명·notarization 상태는 [릴리스 정보](docs/releases/v0.1.0-alpha.4.md)를 확인하세요. Intel 빌드, macOS 14–26 실행, OS 입력 및 VoiceOver 검증은 완료하지 않았습니다.
 
 자세한 범위와 알려진 문제는 [현재 제한](docs/limitations.md)을 확인하세요.
 
@@ -133,7 +144,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-위 환경의 개발자 로컬 실행에서 **Rust 102개·Swift 100개 테스트**와 합성 CLI·네이티브 통신 시나리오, 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사를 통과했습니다(2026-10-23). CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
+위 환경의 개발자 로컬 실행에서 **Rust 102개·Swift 128개 테스트**와 합성 CLI·네이티브 통신 시나리오, 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사를 통과했습니다(2026-10-23). CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
 
 - [개발 환경·검증 명령](docs/development.md)
 - [구조와 실행 경계](docs/architecture.md)

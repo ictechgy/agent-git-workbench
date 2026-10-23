@@ -56,17 +56,30 @@ struct DockWorkspace: View {
   @ObservedObject var store: WorkbenchStore
   @ObservedObject var layout: LayoutPreferences
   let drag: DockDragSession
-  @StateObject private var branches = BranchBrowserModel()
+  @StateObject private var branches: BranchBrowserModel
+  @StateObject private var diffPresentation: DiffPresentationModel
+  init(
+    store: WorkbenchStore, layout: LayoutPreferences, drag: DockDragSession,
+    diffPresentation: DiffPresentationModel? = nil, branchBrowser: BranchBrowserModel? = nil
+  ) {
+    self.store = store
+    self.layout = layout
+    self.drag = drag
+    _branches = StateObject(wrappedValue: branchBrowser ?? BranchBrowserModel())
+    _diffPresentation = StateObject(wrappedValue: diffPresentation ?? DiffPresentationModel())
+  }
   var body: some View {
     GeometryReader { geometry in
-      let minimum = layout.dockLayout.root?.minimumSize ?? .zero
+      let minimum = layout.dockLayout.root?.minimumSize(focusedPane: layout.focusedPane) ?? .zero
       let size = CGSize(
         width: max(geometry.size.width, minimum.width),
         height: max(geometry.size.height, minimum.height))
       ScrollView([.horizontal, .vertical]) {
         ZStack(alignment: .topLeading) {
           if let root = layout.dockLayout.root {
-            DockNodeView(node: root, store: store, layout: layout, drag: drag, branches: branches)
+            DockNodeView(
+              node: root, store: store, layout: layout, drag: drag, branches: branches,
+              diffPresentation: diffPresentation)
           } else {
             VStack(spacing: 16) {
               Text("표시할 패널을 선택하세요").font(.headline)
@@ -86,7 +99,10 @@ struct DockWorkspace: View {
             drag.bounds = CGRect(origin: .zero, size: size)
           }
       }.background(WorkbenchTheme.chrome)
-        .onExitCommand { drag.cancel() }
+        .onExitCommand {
+          if drag.pane != nil { drag.cancel() } else { layout.restorePaneLayout() }
+        }
+        .onChange(of: layout.focusedPane) { _, _ in drag.cancel() }
         .onReceive(
           NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
         ) { _ in drag.cancel() }
@@ -100,60 +116,100 @@ private struct DockNodeView: View {
   @ObservedObject var layout: LayoutPreferences
   let drag: DockDragSession
   @ObservedObject var branches: BranchBrowserModel
+  @ObservedObject var diffPresentation: DiffPresentationModel
   var body: some View {
     switch node {
     case .tabs(_, let panes, let active):
+      let displayed = layout.focusedPane.flatMap { panes.contains($0) ? $0 : nil } ?? active
       VStack(spacing: 0) {
         HStack(spacing: 0) {
           ScrollViewReader { proxy in
             ScrollView(.horizontal) {
               HStack(spacing: 0) {
                 ForEach(panes) { pane in
-                  DockTab(pane: pane, title: paneTitle(pane), selected: pane == active,
-                    showsSelection: panes.count > 1, layout: layout, drag: drag).id(pane)
+                  DockTab(
+                    pane: pane, title: paneTitle(pane), selected: pane == displayed,
+                    showsSelection: panes.count > 1, layout: layout, drag: drag
+                  ).id(pane)
                 }
               }
             }.scrollIndicators(.hidden)
-              .onChange(of: active) { _, pane in proxy.scrollTo(pane, anchor: .center) }
+              .onChange(of: displayed) { _, pane in proxy.scrollTo(pane, anchor: .center) }
+          }
+          if layout.focusedPane == displayed {
+            Button("원래 배치로", systemImage: "arrow.down.right.and.arrow.up.left") {
+              layout.restorePaneLayout()
+            }.font(.system(size: 11)).buttonStyle(.borderless).fixedSize()
+              .help("확대하기 전의 패널 배치와 비율로 돌아갑니다.")
+              .padding(.horizontal, 6)
           }
           Menu {
+            Button(layout.focusedPane == displayed ? "원래 배치로" : "패널 크게 보기") {
+              layout.focusPane(displayed)
+            }
+            Divider()
             ForEach(DockEdge.allCases) { edge in
               Menu(edge.title) {
-                ForEach(layout.dockLayout.panes.filter { $0 != active }) { target in
-                  Button(target.title) { layout.dockPane(active, nextTo: target, edge: edge) }
+                ForEach(layout.dockLayout.panes.filter { $0 != displayed }) { target in
+                  Button(target.title) { layout.dockPane(displayed, nextTo: target, edge: edge) }
                 }
               }
             }
+            Menu("전체 영역") {
+              ForEach(DockEdge.allCases.filter { $0 != .center }) { edge in
+                Button(edge.title) { layout.dockPane(displayed, nextTo: nil, edge: edge) }
+              }
+            }
             Divider()
-            Button("이 패널 숨기기") { layout.hidePane(active) }
+            Button("이 패널 숨기기") { layout.hidePane(displayed) }
           } label: {
             Image(systemName: "ellipsis")
           }.menuStyle(.borderlessButton).fixedSize()
-            .accessibilityLabel("\(active.title) 배치 메뉴").padding(.horizontal, 7)
+            .accessibilityLabel("\(displayed.title) 배치 메뉴").padding(.horizontal, 7)
         }.frame(height: 32).background(WorkbenchTheme.panel)
         Divider()
-        paneContent(active).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+        paneContent(displayed).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
       }.riverPaneSurface()
         .background(
           GeometryReader { geometry in
             Color.clear.preference(
               key: DockGeometryKey.self,
-              value: Dictionary(
-                uniqueKeysWithValues: panes.map { ($0, geometry.frame(in: .named("dock-canvas"))) })
+              value: layout.focusedPane.map { !panes.contains($0) } == true
+                ? [:]
+                : Dictionary(
+                  uniqueKeysWithValues: panes.map {
+                    ($0, geometry.frame(in: .named("dock-canvas")))
+                  })
             )
           })
     case .split(let id, let axis, let ratio, let first, let second):
       DockSplit(
-        id: id, axis: axis, ratio: ratio, firstMinimum: first.minimumSize,
-        secondMinimum: second.minimumSize, layout: layout
+        id: id, axis: axis, ratio: ratio,
+        firstMinimum: first.minimumSize(focusedPane: layout.focusedPane),
+        secondMinimum: second.minimumSize(focusedPane: layout.focusedPane),
+        firstPresented: layout.focusedPane.map { first.contains($0) } ?? true,
+        secondPresented: layout.focusedPane.map { second.contains($0) } ?? true,
+        accessibilityTitle: dividerTitle(first: first, second: second, axis: axis), layout: layout
       ) {
         AnyView(
-          DockNodeView(node: first, store: store, layout: layout, drag: drag, branches: branches))
+          DockNodeView(
+            node: first, store: store, layout: layout, drag: drag, branches: branches,
+            diffPresentation: diffPresentation))
       } second: {
         AnyView(
-          DockNodeView(node: second, store: store, layout: layout, drag: drag, branches: branches))
+          DockNodeView(
+            node: second, store: store, layout: layout, drag: drag, branches: branches,
+            diffPresentation: diffPresentation))
       }
     }
+  }
+  private func dividerTitle(first: DockNode, second: DockNode, axis: DockAxis) -> String {
+    if first.panes.count == 1, second.panes.count == 1,
+      let a = first.panes.first, let b = second.panes.first
+    {
+      return "\(a.title) · \(b.title) 사이 크기 조절"
+    }
+    return axis == .horizontal ? "좌우 패널 너비 조절" : "위아래 패널 높이 조절"
   }
   private func paneTitle(_ pane: WorkbenchPane) -> String {
     switch pane {
@@ -165,7 +221,7 @@ private struct DockNodeView: View {
   @ViewBuilder private func paneContent(_ pane: WorkbenchPane) -> some View {
     switch pane {
     case .files: WorkspaceSidebar(store: store)
-    case .diff: DiffWorkspace(store: store)
+    case .diff: DiffWorkspace(store: store, presentation: diffPresentation)
     case .graph: CommitHistory(store: store, expanded: .constant(true), allowsCollapse: false)
     case .commit:
       TaskInspector(
@@ -193,10 +249,15 @@ private struct DockTab: View {
   let drag: DockDragSession
   @GestureState private var dragging = false
   @State private var hovering = false
+  @State private var cursorPushed = false
   var body: some View {
     HStack(spacing: 7) {
-      Image(systemName: "circle.grid.2x3.fill").font(.system(size: 8))
-        .foregroundStyle(WorkbenchTheme.secondaryText).opacity(hovering ? 1 : 0.35)
+      Image(
+        systemName: layout.focusedPane == nil
+          ? "circle.grid.2x3.fill" : "arrow.up.left.and.arrow.down.right"
+      )
+      .font(.system(size: 8))
+      .foregroundStyle(WorkbenchTheme.secondaryText).opacity(hovering ? 1 : 0.35)
       Label {
         Text(title)
       } icon: {
@@ -209,15 +270,24 @@ private struct DockTab: View {
     .padding(.horizontal, 12).frame(height: 32)
     .background(selected && showsSelection ? WorkbenchTheme.canvas : .clear)
     .overlay(alignment: .top) {
-      if selected && showsSelection { Rectangle().fill(WorkbenchTheme.accent).frame(height: 2).allowsHitTesting(false) }
+      if selected && showsSelection {
+        Rectangle().fill(WorkbenchTheme.accent).frame(height: 2).allowsHitTesting(false)
+      }
     }
     .contentShape(Rectangle())
     .onTapGesture { layout.selectPane(pane) }
     .gesture(
       DragGesture(minimumDistance: 6, coordinateSpace: .named("dock-canvas"))
         .updating($dragging) { _, state, _ in state = true }
-        .onChanged { value in drag.drag(pane, to: value.location) }
+        .onChanged { value in
+          guard layout.focusedPane == nil else { return }
+          drag.drag(pane, to: value.location)
+        }
         .onEnded { value in
+          guard layout.focusedPane == nil else {
+            drag.cancel()
+            return
+          }
           drag.drag(pane, to: value.location)
           drag.finish(in: layout)
         }
@@ -226,18 +296,39 @@ private struct DockTab: View {
     .onHover { inside in
       guard inside != hovering else { return }
       hovering = inside
-      if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
-    }
-    .onDisappear {
-      if hovering {
+      if inside && layout.focusedPane == nil {
+        NSCursor.openHand.push()
+        cursorPushed = true
+      } else if cursorPushed {
         NSCursor.pop()
-        hovering = false
+        cursorPushed = false
       }
     }
-    .accessibilityElement().accessibilityLabel("\(title) 패널 · 드래그하여 이동")
+    .onChange(of: layout.focusedPane) { _, focused in
+      if focused != nil, cursorPushed {
+        NSCursor.pop()
+        cursorPushed = false
+      } else if focused == nil, hovering, !cursorPushed {
+        NSCursor.openHand.push()
+        cursorPushed = true
+      }
+    }
+    .onDisappear {
+      if cursorPushed {
+        NSCursor.pop()
+        cursorPushed = false
+      }
+      hovering = false
+    }
+    .accessibilityElement().accessibilityLabel(
+      layout.focusedPane == nil ? "\(title) 패널 · 드래그하여 이동" : "\(title) 패널"
+    )
     .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     .accessibilityAction { layout.selectPane(pane) }
-    .help("제목을 끌어 다른 패널의 좌·우·위·아래에 놓기 · 중앙은 탭 합치기")
+    .help(
+      layout.focusedPane == nil
+        ? "제목을 끌어 다른 패널의 좌·우·위·아래에 놓기 · 중앙은 탭 합치기"
+        : "확대 중에는 끌어 이동하지 않습니다. ‘원래 배치로’ 돌아가거나 배치 메뉴를 사용하세요.")
   }
 }
 
@@ -263,7 +354,8 @@ private struct DockDragOverlay: View {
             }
           }
           .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(WorkbenchTheme.line))
-          .position(x: min(size.width - 90, max(90, drag.location.x)), y: max(18, drag.location.y - 24))
+          .position(
+            x: min(size.width - 90, max(90, drag.location.x)), y: max(18, drag.location.y - 24))
       }
     }.frame(width: size.width, height: size.height)
   }
@@ -290,6 +382,9 @@ private struct DockSplit<First: View, Second: View>: View {
   let ratio: Double
   let firstMinimum: CGSize
   let secondMinimum: CGSize
+  let firstPresented: Bool
+  let secondPresented: Bool
+  let accessibilityTitle: String
   @ObservedObject var layout: LayoutPreferences
   @ViewBuilder let first: () -> First
   @ViewBuilder let second: () -> Second
@@ -299,23 +394,51 @@ private struct DockSplit<First: View, Second: View>: View {
   @GestureState private var resizing = false
   var body: some View {
     GeometryReader { geometry in
-      let available = max(1, (axis == .horizontal ? geometry.size.width : geometry.size.height) - 6)
+      let showsDivider = firstPresented && secondPresented
+      let dividerLength = showsDivider ? 6.0 : 0
+      let available = max(
+        0, (axis == .horizontal ? geometry.size.width : geometry.size.height) - dividerLength)
       let minimumA = axis == .horizontal ? firstMinimum.width : firstMinimum.height
       let minimumB = axis == .horizontal ? secondMinimum.width : secondMinimum.height
-      let sizing = DockSplitGeometry(available: available, firstMinimum: minimumA, secondMinimum: minimumB)
-      let length = available * sizing.clampedRatio(proposedRatio ?? ratio)
+      let sizing = DockSplitGeometry(
+        available: available, firstMinimum: minimumA, secondMinimum: minimumB)
+      let length =
+        firstPresented
+        ? (secondPresented ? available * sizing.clampedRatio(proposedRatio ?? ratio) : available)
+        : 0
+      let secondLength = secondPresented ? available - length : 0
       if axis == .horizontal {
         HStack(spacing: 0) {
-          first().frame(width: max(0, length))
-          divider(sizing: sizing).frame(width: 6)
-          second().frame(maxWidth: .infinity)
+          first().frame(width: max(0, length)).clipped()
+            .opacity(firstPresented ? 1 : 0).accessibilityHidden(!firstPresented)
+            .allowsHitTesting(firstPresented)
+          divider(sizing: sizing).frame(width: dividerLength)
+            .opacity(showsDivider ? 1 : 0).accessibilityHidden(!showsDivider)
+            .allowsHitTesting(showsDivider)
+          second().frame(width: max(0, secondLength)).clipped()
+            .opacity(secondPresented ? 1 : 0).accessibilityHidden(!secondPresented)
+            .allowsHitTesting(secondPresented)
         }
       } else {
         VStack(spacing: 0) {
-          first().frame(height: max(0, length))
-          divider(sizing: sizing).frame(height: 6)
-          second().frame(maxHeight: .infinity)
+          first().frame(height: max(0, length)).clipped()
+            .opacity(firstPresented ? 1 : 0).accessibilityHidden(!firstPresented)
+            .allowsHitTesting(firstPresented)
+          divider(sizing: sizing).frame(height: dividerLength)
+            .opacity(showsDivider ? 1 : 0).accessibilityHidden(!showsDivider)
+            .allowsHitTesting(showsDivider)
+          second().frame(height: max(0, secondLength)).clipped()
+            .opacity(secondPresented ? 1 : 0).accessibilityHidden(!secondPresented)
+            .allowsHitTesting(secondPresented)
         }
+      }
+    }
+    .onChange(of: layout.focusedPane) { _, _ in
+      proposedRatio = nil
+      dragStart = nil
+      if hovering {
+        NSCursor.pop()
+        hovering = false
       }
     }
   }
@@ -323,20 +446,29 @@ private struct DockSplit<First: View, Second: View>: View {
     Rectangle().fill(WorkbenchTheme.chrome)
       .overlay {
         Rectangle().fill(hovering || resizing ? WorkbenchTheme.accent : WorkbenchTheme.line)
-          .frame(width: axis == .horizontal ? (hovering || resizing ? 2 : 1) : nil,
-                 height: axis == .vertical ? (hovering || resizing ? 2 : 1) : nil)
+          .frame(
+            width: axis == .horizontal ? (hovering || resizing ? 2 : 1) : nil,
+            height: axis == .vertical ? (hovering || resizing ? 2 : 1) : nil
+          )
           .allowsHitTesting(false)
       }.contentShape(Rectangle())
       .gesture(
         DragGesture(minimumDistance: 1, coordinateSpace: .global)
           .updating($resizing) { _, state, _ in state = true }
           .onChanged { value in
+            guard layout.focusedPane == nil else { return }
             if dragStart == nil { dragStart = sizing.clampedRatio(ratio) }
             let distance = axis == .horizontal ? value.translation.width : value.translation.height
             proposedRatio = sizing.resizedRatio(from: dragStart ?? ratio, by: distance)
           }.onEnded { value in
+            guard layout.focusedPane == nil else {
+              proposedRatio = nil
+              dragStart = nil
+              return
+            }
             let distance = axis == .horizontal ? value.translation.width : value.translation.height
-            layout.resizeDock(id, ratio: sizing.resizedRatio(from: dragStart ?? ratio, by: distance))
+            layout.resizeDock(
+              id, ratio: sizing.resizedRatio(from: dragStart ?? ratio, by: distance))
             proposedRatio = nil
             dragStart = nil
           }
@@ -348,6 +480,7 @@ private struct DockSplit<First: View, Second: View>: View {
         }
       }
       .onHover { inside in
+        guard layout.focusedPane == nil else { return }
         guard inside != hovering else { return }
         hovering = inside
         if inside {
@@ -355,12 +488,21 @@ private struct DockSplit<First: View, Second: View>: View {
         } else {
           NSCursor.pop()
         }
-      }.onDisappear { if hovering { NSCursor.pop(); hovering = false } }
-      .accessibilityElement().accessibilityLabel("pane 영역 크기 조절")
+      }.onDisappear {
+        if hovering {
+          NSCursor.pop()
+          hovering = false
+        }
+      }
+      .accessibilityElement().accessibilityLabel(accessibilityTitle)
       .accessibilityValue("\(Int(ratio * 100)) 퍼센트")
       .accessibilityAdjustableAction { direction in
-        layout.resizeDock(id, ratio: sizing.resizedRatio(from: ratio,
-          by: sizing.available * (direction == .increment ? 0.05 : -0.05)))
+        guard layout.focusedPane == nil else { return }
+        layout.resizeDock(
+          id,
+          ratio: sizing.resizedRatio(
+            from: ratio,
+            by: sizing.available * (direction == .increment ? 0.05 : -0.05)))
       }
   }
 }
@@ -393,18 +535,27 @@ private struct DockDropPreview: View {
 extension DockEdge: Identifiable { public var id: String { rawValue } }
 
 extension DockNode {
-  fileprivate var minimumSize: CGSize {
+  fileprivate func minimumSize(focusedPane: WorkbenchPane?) -> CGSize {
+    if let focusedPane {
+      return contains(focusedPane) ? focusedPane.minimumSize : .zero
+    }
     switch self {
     case .tabs(_, _, let active):
-      return CGSize(
-        width: active == .branches || active == .diff ? 340 : 210,
-        height: active == .branches ? 300 : (active == .commit ? 235 : 150))
+      return active.minimumSize
     case .split(_, let axis, _, let first, let second):
-      let a = first.minimumSize
-      let b = second.minimumSize
+      let a = first.minimumSize(focusedPane: nil)
+      let b = second.minimumSize(focusedPane: nil)
       return axis == .horizontal
         ? CGSize(width: a.width + b.width + 6, height: max(a.height, b.height))
         : CGSize(width: max(a.width, b.width), height: a.height + b.height + 6)
     }
+  }
+}
+
+extension WorkbenchPane {
+  fileprivate var minimumSize: CGSize {
+    CGSize(
+      width: self == .branches || self == .diff ? 340 : 210,
+      height: self == .branches ? 300 : (self == .commit ? 235 : 150))
   }
 }
