@@ -21,7 +21,7 @@ python3 scripts/build_macos.py --configuration release --version 0.1.0-alpha.1 -
 
 일반 설치 방법은 [README](../README.md#install-on-macos), 현재 공개 아티팩트의 상태는 [0.1.0-alpha.1 릴리스 정보](releases/v0.1.0-alpha.1.md)에 있습니다. 개발자가 로컬에서 만드는 ad-hoc 빌드와 공개 릴리스의 서명·notarization 상태는 별도로 확인하세요.
 
-패키징 스크립트는 별도의 release 빌드를 만들고 앱과 내장 엔진의 architecture가 같은지 확인합니다. 기본 출력 위치는 `dist/`입니다.
+패키징 스크립트는 별도의 release 빌드를 만들고 앱과 내장 엔진의 architecture가 같은지 확인합니다. 새 빌드는 커밋한 깨끗한 소스에서 실행해야 합니다. 추적 파일의 변경, 런타임 소스 폴더의 미추적 파일, 빌드 중 소스 변경이 있으면 중단합니다. 같은 출력 폴더의 동시 패키징은 잠금으로 거부합니다. 기본 출력 위치는 `dist/`입니다.
 
 ```sh
 python3 scripts/package_macos.py --version 0.1.0-alpha.1 --build-number 2
@@ -35,7 +35,7 @@ dist/River-0.1.0-alpha.1-macos-arm64.dmg.sha256
 dist/River-0.1.0-alpha.1-macos-arm64.manifest.json
 ```
 
-DMG에는 `River.app`과 `Applications` 링크가 들어 있습니다. `--output-dir`로 출력 폴더를 바꿀 수 있습니다. 이미 빌드한 release 앱은 `--app /absolute/path/River.app`으로 지정할 수 있지만 요청 버전·build 번호가 일치해야 하며, 이 옵션은 앱을 다시 서명하지 않습니다. 이때 `--sign-identity`를 함께 지정하면 같은 개발 팀의 인증서로 DMG만 서명합니다.
+DMG에는 `River.app`과 `Applications` 링크가 들어 있습니다. `--output-dir`로 출력 폴더를 바꿀 수 있습니다. 이미 빌드한 release 앱은 `--app /absolute/path/River.app`으로 지정할 수 있지만 요청 버전·build 번호가 일치해야 하며, 이 옵션은 앱을 다시 서명하거나 그 앱의 소스 커밋을 보증하지 않습니다. 이때 `--sign-identity`를 함께 지정하면 같은 개발 팀의 인증서로 DMG만 서명합니다.
 
 Developer ID로 서명하려면 로컬 키체인의 인증서 이름을 지정합니다. 아래 이름과 프로필은 자신의 환경 값으로 바꾸세요.
 

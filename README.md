@@ -18,7 +18,7 @@ The app UI and detailed guides are currently in Korean. English translations of 
 
 - **Apple Silicon (arm64) only.** This release does not include an Intel build.
 - **macOS 14 or later is the declared target.** Runtime testing has only covered macOS 27.0.1; compatibility with older supported versions has not been verified.
-- **Apple command-line Git is required.** If `/usr/bin/git --version` does not work, install Apple's [Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools) with `xcode-select --install`. River includes its app and engine; Rust, Swift, Node, and a source build are not required to use the download.
+- **Apple command-line Git is required.** If `/usr/bin/git --version` does not work, install Apple's [Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools) with `xcode-select --install`. The built-in example also requires `python3` for its preparation recipes. River includes its app and engine; Rust, Swift, Node, and a source build are not required to use the download.
 
 1. Download and open the `.dmg` file.
 2. Drag **River.app** into **Applications**.

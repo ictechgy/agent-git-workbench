@@ -16,7 +16,7 @@
 
 - `0.1.0-alpha.1`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
 - 선언된 최소 대상은 macOS 14이지만 실행 검증은 macOS 27.0.1에서만 했습니다. macOS 14–26에서의 호환성은 아직 검증하지 않았습니다.
-- 앱과 Rust 엔진은 함께 배포하지만 Git은 포함하지 않습니다. 런타임은 `/usr/bin:/bin:/usr/sbin:/sbin` 경로를 사용하므로 Apple Command Line Tools 또는 Xcode의 Git이 필요합니다. Homebrew 전용 경로의 Git은 사용하지 않습니다.
+- 앱과 Rust 엔진은 함께 배포하지만 Git은 포함하지 않습니다. 런타임은 `/usr/bin:/bin:/usr/sbin:/sbin` 경로를 사용하므로 Apple Command Line Tools 또는 Xcode의 Git이 필요합니다. Homebrew 전용 경로의 Git은 사용하지 않습니다. 내장 예제의 준비 스크립트는 `python3`도 실행합니다.
 - 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.1.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
 - 자동 업데이트 기능은 없습니다. 새 버전은 GitHub Releases에서 다운로드해 교체합니다.
 - 라이선스는 미확정이며 현재 Cargo 메타데이터는 `UNLICENSED`입니다.

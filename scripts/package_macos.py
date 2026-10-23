@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build and verify a release DMG; credentials stay in a notarytool Keychain profile."""
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -20,11 +22,21 @@ English
 1. Drag River.app to Applications.
 2. Eject this disk image, then open River from Applications.
 Requires macOS 14 or later. This is an early alpha release.
+Apple command-line Git is required. Check it with /usr/bin/git --version.
+If Git is unavailable, run xcode-select --install in Terminal to install Apple's
+Command Line Tools. Full Xcode is not required to use River.
+The built-in example also requires python3 for its preparation recipes.
+Command Line Tools: https://developer.apple.com/documentation/xcode/installing-the-command-line-tools
 
 한국어
 1. River.app을 Applications 폴더로 드래그하세요.
 2. 이 디스크 이미지를 추출한 뒤 응용 프로그램 폴더에서 River를 여세요.
 macOS 14 이상이 필요합니다. 초기 알파 릴리스입니다.
+Apple 명령줄 Git이 필요합니다. /usr/bin/git --version으로 확인하세요.
+Git을 사용할 수 없으면 터미널에서 xcode-select --install을 실행해 Apple의
+Command Line Tools를 설치하세요. River 사용에 전체 Xcode는 필요하지 않습니다.
+앱의 기본 예제는 준비 레시피를 실행할 때 python3도 필요합니다.
+Command Line Tools 안내: https://developer.apple.com/documentation/xcode/installing-the-command-line-tools
 
 Signing / 서명: {signing}
 {gatekeeper}
@@ -41,6 +53,52 @@ def sha256(path):
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+@contextmanager
+def output_lock(output):
+    # Keep this file: unlinking a locked inode would let a new process bypass it.
+    with (output / ".river-package.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("another packager is using this --output-dir") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def source_snapshot(root=None):
+    root = ROOT if root is None else root
+    head = run("git", "rev-parse", "HEAD", cwd=root, capture_output=True, text=True).stdout.strip()
+    status = run("git", "status", "--porcelain=v1", "-z", "--untracked-files=no", cwd=root,
+                 capture_output=True).stdout
+    patch = run("git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--",
+                cwd=root, capture_output=True).stdout
+    # Include ignored files here too: an ignored Swift/Rust file can still enter a build.
+    untracked = run("git", "ls-files", "--others", "-z", "--", "apps/macos/Sources", "crates",
+                    cwd=root, capture_output=True).stdout
+    if run("git", "rev-parse", "HEAD", cwd=root,
+           capture_output=True, text=True).stdout.strip() != head:
+        raise ValueError("source HEAD changed while capturing build provenance")
+    return {"kind": "clean-git-build", "git_commit": head, "tracked_status": os.fsdecode(status),
+            "tracked_patch_sha256": hashlib.sha256(patch).hexdigest(),
+            "untracked_runtime_files": [os.fsdecode(path) for path in untracked.split(b"\0") if path]}
+
+
+def clean_source_snapshot(root=None):
+    initial = source_snapshot(root)
+    if initial["tracked_status"]:
+        raise ValueError("release packaging requires a clean tracked source tree; commit changes first")
+    if initial["untracked_runtime_files"]:
+        raise ValueError("release packaging requires tracked runtime files under apps/macos/Sources and crates")
+    return initial
+
+
+def verify_source_unchanged(initial, root=None):
+    if source_snapshot(root) != initial:
+        raise ValueError("source changed during packaging; no release artifacts were published")
 
 
 def architectures(path):
@@ -174,6 +232,12 @@ def package(args):
         raise ValueError("--notary-profile requires --sign-identity with a Developer ID Application identity")
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    with output_lock(output):
+        package_locked(args, output, expected)
+
+
+def package_locked(args, output, expected):
+    initial_source = clean_source_snapshot() if not args.app else {"kind": "provided-app"}
     with tempfile.TemporaryDirectory(prefix=".river-release-", dir=output) as temporary:
         workspace = Path(temporary)
         staging = workspace / "payload"
@@ -200,7 +264,13 @@ def package(args):
         gatekeeper = ("This image is notarized by Apple. / Apple 공증을 받은 이미지입니다."
                       if args.notary_profile else
                       "This image is not notarized by Apple. macOS may block opening this alpha.\n"
-                      "Apple 공증을 받지 않은 이미지입니다. macOS가 이 알파 앱 실행을 차단할 수 있습니다.")
+                      "If you trust this download, attempt to open River, then use\n"
+                      "System Settings > Privacy & Security > Open Anyway and confirm Open.\n"
+                      "Apple 공증을 받지 않은 이미지입니다. macOS가 이 알파 앱 실행을 차단할 수 있습니다.\n"
+                      "다운로드 출처를 신뢰한다면 River 실행을 한 번 시도한 뒤\n"
+                      "시스템 설정 > 개인정보 보호 및 보안 > 확인 없이 열기(Open Anyway)에서 허용하고\n"
+                      "열기를 확인하세요.\n"
+                      "Apple's guide / Apple 안내: https://support.apple.com/en-us/102445")
         (staging / "READ ME - INSTALL.txt").write_text(INSTALL_README.format(
             signing="Developer ID" if developer_id else "ad-hoc / 임시 서명", gatekeeper=gatekeeper),
             encoding="utf-8")
@@ -219,16 +289,16 @@ def package(args):
                     "disk_image": {"filename": names[0], "format": "UDZO", "sha256": checksum,
                                    "size_bytes": dmg.stat().st_size,
                                    "signing": "developer-id" if developer_id and args.sign_identity else "unsigned",
-                                   "mount_copy_verified": True}, "notarization": notarization}
+                                   "mount_copy_verified": True}, "notarization": notarization,
+                    "source_provenance": initial_source}
         if not args.app:
-            manifest["source_git_commit"] = run("git", "rev-parse", "HEAD", cwd=ROOT,
-                                                  capture_output=True, text=True).stdout.strip()
-            manifest["source_tracked_dirty"] = bool(run("git", "status", "--porcelain",
-                                                         "--untracked-files=no", cwd=ROOT,
-                                                         capture_output=True, text=True).stdout)
+            manifest["source_git_commit"] = initial_source["git_commit"]
+            manifest["source_tracked_dirty"] = False
         (workspace / names[1]).write_text(f"{checksum}  {names[0]}\n", encoding="utf-8")
         (workspace / names[2]).write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
                                           encoding="utf-8")
+        if not args.app:
+            verify_source_unchanged(initial_source)
         for name in names:
             (workspace / name).rename(output / name)
     for name in names:

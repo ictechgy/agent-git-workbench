@@ -110,7 +110,7 @@
 
 ## Open questions
 
-- [ ] Product owner: choose a license before a public alpha release.
+- [ ] Product owner: choose a license for the project. The authorized public testing alpha retains the disclosed `UNLICENSED` status; distribution does not imply that licensing is resolved.
 - [ ] QA: complete OS-level keyboard/VoiceOver testing and verify long names and dense custom layouts across supported systems.
 - [ ] Performance: measure repository switching, worktree creation against Git CLI, and idle/active memory on large repositories before making performance claims.
 - [ ] Distribution: complete Apple notarization and minimum-supported-macOS runtime validation. Developer ID-signed DMG packaging is available; see [release notes](docs/releases/v0.1.0-alpha.1.md).
