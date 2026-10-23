@@ -1764,6 +1764,35 @@ func completedCloneKeepsKnownOutcomeWhenFollowUpReadsFail(phase: String) async t
 // do not unregister SwiftUI keyboard shortcuts or resign a native text editor.
 @Suite(.serialized) @MainActor
 struct FocusedDockKeyboardRegressionTests {
+  @Test func escapeRestoresFocusedPaneThroughWindowDispatch() async throws {
+    let replies = GitMutationReplies()
+    let server = try TestService { replies.respond($0) }
+    let store = WorkbenchStore(socketPath: server.path); await store.connect()
+    let suite = "river-dock-escape-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let layout = LayoutPreferences(defaults: defaults); layout.apply(.balanced)
+    store.commitMessage = "Escape must preserve this draft"
+    let (window, host) = mount(store: store, layout: layout, defaults: defaults)
+    defer { window.close() }
+    try await settle(host)
+    let configuration = layout.configuration
+    let storedConfiguration = defaults.data(forKey: "workbench.layout.v1")
+    for _ in 0..<2 {
+      layout.focusPane(.diff)
+      try await settle(host)
+      #expect(layout.focusedPane == .diff)
+      window.sendEvent(try key(window, characters: "\u{1b}", code: 53))
+      try await settle(host)
+      #expect(layout.focusedPane == nil)
+      #expect(layout.configuration == configuration)
+      #expect(defaults.data(forKey: "workbench.layout.v1") == storedConfiguration)
+    }
+    #expect(store.commitMessage == "Escape must preserve this draft")
+    #expect(replies.writeCount == 0)
+    withExtendedLifetime(server) {}
+  }
+
   @Test func hiddenCommitShortcutCannotWriteAndRestoredCommitCan() async throws {
     let replies = GitMutationReplies()
     let server = try TestService { replies.respond($0) }

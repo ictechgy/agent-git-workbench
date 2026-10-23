@@ -5,22 +5,41 @@ import SwiftUI
 /// Use this dock's own window, which may differ from a popover's key window.
 struct DockFocusResponderReset: NSViewRepresentable {
   let focusedPane: WorkbenchPane?
+  var onExit: () -> Void
+
+  final class InputView: NSView {
+    var onExit: () -> Void = {}
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) {
+      if event.keyCode == 53,
+        event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+      {
+        onExit()
+      } else {
+        super.keyDown(with: event)
+      }
+    }
+    override func cancelOperation(_ sender: Any?) { onExit() }
+  }
+
   final class Coordinator {
     var lastPane: WorkbenchPane?
     var revision: UInt64 = 0
-    init(_ pane: WorkbenchPane?) { lastPane = pane }
   }
-  func makeCoordinator() -> Coordinator { Coordinator(focusedPane) }
-  func makeNSView(context: Context) -> NSView { NSView() }
-  func updateNSView(_ view: NSView, context: Context) {
+  func makeCoordinator() -> Coordinator { Coordinator() }
+  func makeNSView(context: Context) -> InputView { InputView() }
+  func updateNSView(_ view: InputView, context: Context) {
+    view.onExit = onExit
     let coordinator = context.coordinator
     guard coordinator.lastPane != focusedPane else { return }
     coordinator.lastPane = focusedPane
     coordinator.revision &+= 1
     let revision = coordinator.revision
+    let isEnlarged = focusedPane != nil
     DispatchQueue.main.async { [weak view, weak coordinator] in
       guard coordinator?.revision == revision, let window = view?.window else { return }
-      window.makeFirstResponder(nil)
+      // Keep Escape in this dock's responder chain after ending hidden input.
+      window.makeFirstResponder(isEnlarged ? view : nil)
     }
   }
 }

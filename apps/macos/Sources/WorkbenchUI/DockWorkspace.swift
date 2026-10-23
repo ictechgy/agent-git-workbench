@@ -106,7 +106,10 @@ struct DockWorkspace: View {
         .onReceive(
           NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
         ) { _ in drag.cancel() }
-    }.background(DockFocusResponderReset(focusedPane: layout.focusedPane))
+    }.background(
+      DockFocusResponderReset(focusedPane: layout.focusedPane) {
+        if drag.pane != nil { drag.cancel() } else { layout.restorePaneLayout() }
+      })
   }
 }
 
