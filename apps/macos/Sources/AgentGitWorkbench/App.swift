@@ -29,9 +29,14 @@ struct AgentGitWorkbenchApp: App {
     .commands {
       CommandGroup(replacing: .newItem) {
         Button("새 작업…") { store.recoveryTaskID = nil; store.showTaskSheet = true }.keyboardShortcut("n").disabled(
-          store.workspace == nil)
+          store.workspace == nil || store.busy || store.remoteBusy)
         Button("원격 저장소 복제…") { store.showCloneSheet = true }.disabled(store.busy)
         Button("저장소 열기…") { store.chooseRepository() }.keyboardShortcut("o").disabled(store.busy)
+        Menu("최근 저장소") {
+          ForEach(store.recentWorkspaces) { recent in
+            Button(recent.name) { Task { await store.openRecent(recent) } }.help(recent.repositoryPath)
+          }
+        }.disabled(store.busy || store.recentWorkspaces.isEmpty)
         Button("시작 화면") { store.showingWelcome = true }.disabled(store.busy)
       }
     }

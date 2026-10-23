@@ -90,7 +90,8 @@ private final class Replies: @unchecked Sendable {
   var revision = 1; var purpose = "saved"; var diffFails = true; var statusFails = false
   var includeTask = false; var taskFails = false; var eventsFail = false
   var contextScopes: [String] = []
-  var diffCalls = 0; var notifications = 0
+  var diffCalls = 0; var notifications = 0; var stageCalls = 0
+  var canStageHunks = true
   var holdGet = false; var holdSave = false
   let arrived = Flag(); let gate = DispatchSemaphore(value: 0)
   func context() -> [String: Any] {
@@ -127,7 +128,8 @@ private final class Replies: @unchecked Sendable {
       case "get_diff":
         diffCalls += 1
         if diffFails { return ["schema_version": 1, "error": ["code": "git_failed", "message": "synthetic diff failure"]] }
-        value = ["snapshot_hash": "code", "path": "a.swift", "staged": false, "header": "header\n", "hunks": ["@@ -1 +1 @@\n-a\n+b\n"], "text": "header\n@@ -1 +1 @@\n-a\n+b\n", "can_stage_hunks": true]
+        value = ["snapshot_hash": "code", "path": "a.swift", "staged": false, "header": "header\n", "hunks": ["@@ -1 +1 @@\n-a\n+b\n"], "text": "header\n@@ -1 +1 @@\n-a\n+b\n", "can_stage_hunks": canStageHunks]
+      case "stage_hunk": stageCalls += 1
       default: break
       }
       return ["schema_version": 1, "result": value]
@@ -256,6 +258,152 @@ private final class SubmissionReplies: @unchecked Sendable {
   #expect(store.commitMessage == "same words") // Equal text can still be a newer draft revision.
   replies.lock.withLock { replies.heldMethod = "" }
   await store.commit(); #expect(store.commitMessage.isEmpty)
+}
+
+@Test @MainActor func newPlansAndCloneWaitForActiveGitMutation() async throws {
+  let replies = SubmissionReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let plan = try await store.planTask(group: "group", label: "Task", slug: "task", mode: "isolated")
+  store.commitMessage = "held commit"
+  replies.lock.withLock { replies.heldMethod = "commit" }
+  let committing = Task { await store.commit() }; try await wait(replies.arrived)
+  do { _ = try await store.planTask(group: "group", label: "Another Task", slug: "other", mode: "isolated"); Issue.record("Planned while busy") }
+  catch UIError.busy {}
+  do { try await store.executePlan(plan, key: "do-not-submit"); Issue.record("Submitted while busy") }
+  catch UIError.busy {}
+  do { try await store.cloneRepository(url: "https://git.example/repo", destination: URL(fileURLWithPath: "/tmp/unused")); Issue.record("Cloned while busy") }
+  catch UIError.busy {}
+  #expect(replies.lock.withLock { replies.executeCalls } == 0)
+  replies.gate.signal(); await committing.value
+}
+
+private final class GitMutationReplies: @unchecked Sendable {
+  let base = Replies()
+  let lock = NSLock()
+  let workspaceID: String
+  var failure = ""
+  var refreshFailsAfterWrite = false
+  private var calls: [String] = []
+  private var head = "head-1"
+  private var index = "index-1"
+  init(workspaceID: String = "origin-project") {
+    self.workspaceID = workspaceID
+    base.diffFails = false
+  }
+  var writeCount: Int { lock.withLock { calls.count } }
+  func respond(_ request: [String: Any]) -> [String: Any]? {
+    let method = request["method"] as? String ?? ""
+    let params = request["params"] as? [String: Any] ?? [:]
+    if method == "commit" || method == "stage_hunk" {
+      return lock.withLock {
+        calls.append(method)
+        // Simulate Git accepting the write before its reply is lost or malformed.
+        if failure != "reject" {
+          if method == "commit" { head = "head-2" }
+          index = "index-2"
+        }
+        switch failure {
+        case "disconnect": return nil
+        case "decode": return ["schema_version": 1, "result": ["view": "malformed status"]]
+        case "reject": return ["schema_version": 1, "error": ["code": "stale_snapshot", "message": "changed before submission"]]
+        case "git_write_outcome_unknown", "write_outcome_unknown":
+          return ["schema_version": 1, "error": ["code": failure, "message": "lost completion"]]
+        default: return ["schema_version": 1, "result": [:]]
+        }
+      }
+    }
+    if method == "list_workspaces" {
+      return ["schema_version": 1, "result": [["schema_version": 1, "id": workspaceID,
+        "repositories": [["id": "a", "path": "/tmp/write-origin"], ["id": "b", "path": "/tmp/write-other-folder"]], "groups": []]]]
+    }
+    var reply = base.respond(request)
+    if method == "get_repo_status", var status = reply["result"] as? [String: Any] {
+      let state = lock.withLock { (head, index, refreshFailsAfterWrite && !calls.isEmpty) }
+      if state.2 { return ["schema_version": 1, "error": ["code": "git_failed", "message": "optional refresh failed"]] }
+      status["path"] = params["repo_id"] as? String == "b" ? "/tmp/write-other-folder" : "/tmp/write-origin"
+      status["snapshot_hash"] = state.1 == "index-1" ? "code" : "code-2"
+      status["snapshot"] = ["head": state.0, "branch": "refs/heads/main", "index_hash": state.1]
+      status["files"] = [["path": "a.swift", "index": "M", "worktree": "M"]]
+      reply["result"] = status
+    }
+    if method == "get_diff", var diff = reply["result"] as? [String: Any] {
+      diff["snapshot_hash"] = lock.withLock { index == "index-1" ? "code" : "code-2" }
+      diff["staged"] = params["staged"] as? Bool ?? false
+      reply["result"] = diff
+    }
+    return reply
+  }
+}
+
+@Test(arguments: ["disconnect", "decode", "git_write_outcome_unknown", "write_outcome_unknown"]) @MainActor
+func ambiguousCommitKeepsDraftAndWarnsBeforeRepeat(failure: String) async throws {
+  let replies = GitMutationReplies(); replies.failure = failure
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect(); store.commitMessage = "retain the submitted draft"
+  await store.commit()
+  #expect(store.repository?.snapshot.head == "head-2")
+  #expect(store.commitMessage == "retain the submitted draft")
+  let warning = try #require(store.submissionWarnings.first)
+  #expect(store.submissionWarnings.count == 1); #expect(warning.id.hasPrefix(server.path))
+  #expect(warning.workspaceTitle == "origin-project"); #expect(warning.workspacePath == "/tmp/write-origin")
+  #expect(warning.message.contains("커밋")); #expect(warning.message.contains("반복하기 전에"))
+  await store.refresh(); await store.connect()
+  #expect(store.submissionWarnings == [warning]); #expect(replies.writeCount == 1)
+  #expect(store.commitMessage == "retain the submitted draft")
+}
+
+@Test(arguments: ["disconnect", "decode", "git_write_outcome_unknown", "write_outcome_unknown"]) @MainActor
+func ambiguousStagingWarnsForTheSubmittedFile(failure: String) async throws {
+  let replies = GitMutationReplies(); replies.failure = failure
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect(); store.commitMessage = "retain my draft"
+  await store.stageHunk(0)
+  #expect(store.repository?.snapshot.indexHash == "index-2")
+  #expect(store.commitMessage == "retain my draft")
+  let warning = try #require(store.submissionWarnings.first)
+  #expect(store.submissionWarnings.count == 1); #expect(warning.workspacePath == "/tmp/write-origin")
+  #expect(warning.message.contains("스테이징")); #expect(warning.message.contains("a.swift"))
+  await store.refresh(); #expect(replies.writeCount == 1)
+}
+
+@Test @MainActor func ambiguousGitWriteNoticeKeepsItsOriginAfterNavigationAndWorkspaceSwitch() async throws {
+  let first = GitMutationReplies(); first.failure = "disconnect"
+  let second = GitMutationReplies(workspaceID: "destination-project")
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  store.commitMessage = "origin draft"; await store.commit()
+  let warning = try #require(store.submissionWarnings.first)
+  store.select(.init(repoId: "b")); await store.refresh(forceDiff: true)
+  #expect(store.repository?.path == "/tmp/write-other-folder"); #expect(store.submissionWarnings == [warning])
+  store.socketPath = serverB.path; await store.connect()
+  #expect(store.workspaceTitle == "destination-project"); #expect(store.submissionWarnings == [warning])
+  #expect(warning.workspaceTitle == "origin-project"); #expect(warning.workspacePath == "/tmp/write-origin")
+  store.socketPath = serverA.path; await store.connect()
+  store.select(.init(repoId: "a")); await store.refresh(forceDiff: true)
+  #expect(store.commitMessage == "origin draft"); #expect(store.submissionWarnings == [warning])
+  #expect(first.writeCount == 1); #expect(second.writeCount == 0)
+}
+
+@Test(arguments: ["commit", "stage_hunk"]) @MainActor
+func explicitGitMutationRejectionDoesNotWarnOfUnknownOutcome(method: String) async throws {
+  let replies = GitMutationReplies(); replies.failure = "reject"
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect(); store.commitMessage = "keep rejected draft"
+  if method == "commit" { await store.commit() } else { await store.stageHunk(0) }
+  #expect(store.submissionWarnings.isEmpty); #expect(store.error != nil)
+  #expect(store.repository?.snapshot.head == "head-1"); #expect(store.repository?.snapshot.indexHash == "index-1")
+  #expect(store.commitMessage == "keep rejected draft"); #expect(replies.writeCount == 1)
+}
+
+@Test(arguments: ["commit", "stage_hunk"]) @MainActor
+func confirmedGitMutationWithFailedRefreshKeepsKnownOutcome(method: String) async throws {
+  let replies = GitMutationReplies(); replies.refreshFailsAfterWrite = true
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect(); store.commitMessage = "submitted draft"
+  if method == "commit" { await store.commit() } else { await store.stageHunk(0) }
+  #expect(store.submissionWarnings.isEmpty); #expect(store.error != nil)
+  #expect(store.commitMessage == (method == "commit" ? "" : "submitted draft"))
+  #expect(replies.writeCount == 1)
 }
 
 @Test @MainActor func plansAndDelayedSubmissionsCannotCrossWorkspaceSessions() async throws {
@@ -509,6 +657,105 @@ private func operation() throws -> WorkbenchOperation {
   #expect(!model.isDirty); #expect(!model.working)
 }
 
+@Test @MainActor func confirmedContextSaveKeepsRevisionThroughMetadataFailure() async throws {
+  let replies = ScopedContextReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.selectTask(try #require(store.operations.first)); try await settleSelection(store)
+  store.taskContext.draft?.purpose = "confirmed Task purpose"
+  replies.lock.withLock { replies.holdSave = true }
+  let saving = Task { await store.taskContext.save() }; try await wait(replies.arrived)
+  replies.lock.withLock { replies.paginated = true; replies.lookupFails = true }
+  await store.refresh()
+  #expect(!store.taskContext.loaded); #expect(store.taskContext.working)
+  replies.gate.signal(); await saving.value
+  #expect(store.taskContext.bundle?.context.revision == 8)
+  #expect(store.taskContext.draft?.revision == 8)
+  #expect(!store.taskContext.isDirty); #expect(!store.taskContext.loaded)
+  #expect(!store.canEdit); #expect(!store.taskContext.working)
+  let requests = replies.lock.withLock { replies.requests.count }
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.requests.count } == requests)
+  replies.lock.withLock { replies.lookupFails = false }
+  await store.refresh()
+  store.taskContext.draft?.notes = "next save uses the confirmed revision"
+  await store.taskContext.save()
+  #expect(replies.lock.withLock { replies.contexts["op"]?.revision } == 9)
+  #expect(store.taskContext.draft?.revision == 9); #expect(!store.taskContext.isDirty)
+  #expect(replies.lock.withLock { replies.contexts["repo"]?.revision } == 7)
+}
+
+@Test @MainActor func unsupportedHunksRemainReadableButCannotSubmitStageWrites() async throws {
+  let replies = Replies(); replies.diffFails = false
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect()
+  let previous = try #require(store.diff); let selection = try #require(store.selection)
+  replies.lock.withLock { replies.canStageHunks = false }
+  await store.refresh(forceDiff: true)
+  #expect(store.diff?.canStageHunks == false)
+  #expect(previous.contentIdentity == store.diff?.contentIdentity)
+  #expect(store.canUseRenderedDiff); #expect(store.canMarkRead)
+  #expect(store.hunkRequestText(0, instruction: "explain this change") != nil)
+  await store.stageHunk(0, from: previous, at: selection)
+  await store.stageHunk(0)
+  #expect(replies.lock.withLock { replies.stageCalls } == 0)
+  #expect(store.error != nil); #expect(store.errorDetails == nil)
+}
+
+@Test(arguments: [false, true]) @MainActor
+func taskMetadataFailureKeepsReadingSnapshotReadOnly(reconnect: Bool) async throws {
+  let replies = ScopedContextReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.selectTask(try #require(store.operations.first)); try await settleSelection(store)
+  let status = try #require(store.repository); let diff = try #require(store.diff)
+  let id = try #require(store.currentReviewID)
+  store.markCurrentFileRead(); store.rememberReviewOffset(240, content: diff.contentIdentity, at: id)
+  replies.lock.withLock { replies.paginated = true; replies.lookupFails = true }
+  if reconnect { await store.connect() } else { await store.refresh() }
+  #expect(store.taskInformationUnavailable); #expect(store.selectionCheckFailed)
+  #expect(!store.canEdit); #expect(!store.canMarkRead)
+  #expect(store.repository == status)
+  #expect(store.diff?.contentIdentity == diff.contentIdentity); #expect(store.diff?.text == diff.text)
+  #expect(store.readingCheckpoint?.contentIdentity == diff.contentIdentity)
+  #expect(store.currentReviewScrollOffset == 240)
+  replies.lock.withLock { replies.lookupFails = false }
+  await store.refresh()
+  #expect(store.canEdit); #expect(store.currentReadingState == .reviewed)
+  #expect(store.currentReviewScrollOffset == 240)
+}
+
+@Test @MainActor func failedReconnectKeepsOriginalFolderReadingSnapshotReadOnly() async throws {
+  let replies = Replies(); replies.diffFails = false
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect()
+  let status = try #require(store.repository); let diff = try #require(store.diff)
+  replies.lock.withLock { replies.statusFails = true }
+  await store.connect()
+  #expect(store.repository == status)
+  #expect(store.diff?.contentIdentity == diff.contentIdentity); #expect(store.diff?.text == diff.text)
+  #expect(store.selectionCheckFailed); #expect(!store.canEdit)
+}
+
+@Test @MainActor func metadataWarningsDoNotReplaceActionErrorsAndResetForNewSelection() async throws {
+  let replies = Replies(); replies.diffFails = false
+  let server = try TestService { replies.respond($0) }; let store = WorkbenchStore(socketPath: server.path)
+  await store.connect()
+  store.report(ServiceFailure(code: "stale_snapshot", message: "the submitted write was rejected"))
+  let actionError = store.error; let details = store.errorDetails
+  replies.lock.withLock { replies.eventsFail = true }
+  await store.refresh()
+  #expect(store.error == actionError); #expect(store.errorDetails == details)
+  store.error = nil
+  #expect(store.errorDetails == nil)
+  // A different folder must get its own warning even if the message is identical.
+  store.select(.init(repoId: "b")); try await settleSelection(store)
+  #expect(store.error?.contains("준비 기록") == true)
+  store.error = nil
+  store.report(ServiceFailure(code: "stale_snapshot", message: "old details"))
+  let rendered = try #require(store.diff)
+  await store.stageHunk(0, from: rendered, at: .init(repoId: "wrong-folder"))
+  #expect(store.errorDetails == nil)
+}
+
 @Test @MainActor func taskSaveSurvivesSiblingSwitchAndDirtyDraftSurvivesWorkspaceSwitch() async throws {
   let replies = Replies(); let server = try TestService { replies.respond($0) }
   let model = TaskContextStore(); let client = ServiceClient(socketPath: server.path); let op = try operation()
@@ -634,6 +881,7 @@ private final class ScopedContextReplies: @unchecked Sendable {
   var holdListCall: Int?
   var listCalls = 0
   var holdTaskDetails = false
+  var holdSave = false
   var heldTaskID: String?
   var workspaceID = "space"
   let arrived = Flag()
@@ -656,6 +904,7 @@ private final class ScopedContextReplies: @unchecked Sendable {
       if method == "get_task", holdTaskDetails {
         holdTaskDetails = false; heldTaskID = params["task_id"] as? String; return true
       }
+      if method == "save_task_context", holdSave { holdSave = false; return true }
       return false
     }
     if hold { arrived.value = true; _ = gate.wait(timeout: .now() + .seconds(5)) }
@@ -1215,6 +1464,72 @@ func reconnectCancellationMetadataDoesNotCrossWorkspaces(sameSocket: Bool) async
   #expect(replies.base.lock.withLock { replies.base.diffCalls } == before + 1)
 }
 
+private final class StashReplies: @unchecked Sendable {
+  let base = Replies()
+  let lock = NSLock()
+  var deleted = false
+  init() { base.diffFails = false }
+  func respond(_ request: [String: Any]) -> [String: Any] {
+    let method = request["method"] as? String ?? ""
+    let params = request["params"] as? [String: Any] ?? [:]
+    if method == "list_stashes" {
+      let entries: [[String: Any]] = lock.withLock { deleted ? [] : [
+        ["oid": "stash-oid", "selector": "stash@{0}", "subject": "saved review", "timestamp": "1"],
+      ] }
+      return ["schema_version": 1, "result": entries]
+    }
+    if method == "get_stash" {
+      return ["schema_version": 1, "result": ["oid": "stash-oid", "files": [
+        ["path": "stash.swift", "index": "M", "worktree": " "],
+      ]]]
+    }
+    var reply = base.respond(request)
+    if method == "get_repo_status", var status = reply["result"] as? [String: Any] {
+      status["files"] = [["path": "a.swift", "index": "M", "worktree": "M"],
+                         ["path": "b.swift", "index": "M", "worktree": " "]]
+      reply["result"] = status
+    }
+    if method == "get_diff" || method == "get_stash_diff" {
+      reply = base.respond(["method": "get_diff", "params": params])
+      var diff = reply["result"] as! [String: Any]
+      diff["path"] = params["path"] as? String ?? ""
+      diff["staged"] = method == "get_diff" && (params["staged"] as? Bool ?? false)
+      reply["result"] = diff
+    }
+    return reply
+  }
+}
+
+@Test(arguments: ["return", "deleted", "reconnect", "navigation"]) @MainActor
+func stashReviewRestoresPreviousStagedFile(exit: String) async throws {
+  let replies = StashReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.staged = true; store.selectedFile = "b.swift"; await store.refresh(forceDiff: true)
+  let id = try #require(store.currentReviewID)
+  let diff = try #require(store.diff)
+  store.markCurrentFileRead(); store.rememberReviewOffset(240, content: diff.contentIdentity, at: id)
+  store.chooseStash(try #require(store.stashes.first))
+  #expect(!store.staged)
+  await store.refresh(forceDiff: true)
+  #expect(store.isViewingStash)
+  if exit == "deleted" {
+    replies.lock.withLock { replies.deleted = true }; await store.refresh()
+  } else {
+    if exit == "reconnect" { await store.connect() }
+    if exit == "navigation" {
+      store.select(.init(repoId: "b")); try await settleSelection(store)
+      store.select(.init(repoId: "a")); try await settleSelection(store)
+    }
+    #expect(store.isViewingStash); #expect(!store.staged)
+    store.showWorkingChanges()
+  }
+  #expect(!store.isViewingStash); #expect(store.staged); #expect(store.selectedFile == "b.swift")
+  #expect(store.currentReviewID == id)
+  await store.refresh(forceDiff: true)
+  #expect(store.diff?.path == "b.swift"); #expect(store.diff?.staged == true)
+  #expect(store.currentReadingState == .reviewed); #expect(store.currentReviewScrollOffset == 240)
+}
+
 private final class RemoteReplies: @unchecked Sendable {
   let base = Replies()
   let lock = NSLock()
@@ -1222,6 +1537,7 @@ private final class RemoteReplies: @unchecked Sendable {
   var failure = ""
   var holdRead = false
   var holdWrite = false
+  var snapshot = "code"
   var calls: [(String, [String: Any])] = []
   let arrived = Flag()
   let gate = DispatchSemaphore(value: 0)
@@ -1232,7 +1548,13 @@ private final class RemoteReplies: @unchecked Sendable {
   }
   func respond(_ request: [String: Any]) -> [String: Any]? {
     let method = request["method"] as? String ?? ""
-    guard method == "get_remote_state" || method.hasSuffix("_remote") else { return base.respond(request) }
+    guard method == "get_remote_state" || method.hasSuffix("_remote") else {
+      var reply = base.respond(request)
+      if method == "get_repo_status", var status = reply["result"] as? [String: Any] {
+        status["snapshot_hash"] = lock.withLock { snapshot }; reply["result"] = status
+      }
+      return reply
+    }
     let captured = lock.withLock { () -> ([String: Any], Bool, String) in
       calls.append((method, request["params"] as? [String: Any] ?? [:]))
       let held = method == "get_remote_state" ? holdRead : holdWrite
@@ -1249,6 +1571,21 @@ private final class RemoteReplies: @unchecked Sendable {
     }
   }
   var writeCount: Int { lock.withLock { calls.filter { $0.0 != "get_remote_state" }.count } }
+}
+
+@Test @MainActor func remoteActionsStayDisabledUntilCurrentSnapshotHasRemoteMetadata() async throws {
+  let replies = RemoteReplies(); let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  #expect(!store.canUseRemotes)
+  await store.loadRemoteState(); #expect(store.canUseRemotes)
+  let plan = try store.remotePlan(.push, remote: "origin", branch: "main")
+  replies.lock.withLock { replies.snapshot = "code-2" }
+  await store.refresh()
+  #expect(!store.canUseRemotes)
+  do { try await store.executeRemote(plan); Issue.record("Stale snapshot allowed remote mutation") }
+  catch UIError.staleRemote { store.reportRemote(UIError.staleRemote) }
+  #expect(store.remoteError?.contains("원격 정보") == true); #expect(replies.writeCount == 0)
+  await store.loadRemoteState(); #expect(store.canUseRemotes)
 }
 
 @Test @MainActor func remoteRequestsUseActualFolderScopeAndPreserveReviewDrafts() async throws {
@@ -1324,7 +1661,8 @@ func remoteUnknownOutcomeIsOriginBoundAndExplicitRejectionIsKnown(failure: Strin
   #expect(first.writeCount == 1); #expect(second.writeCount == 0)
 }
 
-@Test @MainActor func completedCloneWithFailedHandshakeKeepsOldWorkspaceAndShowsClonePath() async throws {
+@Test(arguments: ["handshake", "recent-read"]) @MainActor
+func completedCloneKeepsKnownOutcomeWhenFollowUpReadsFail(phase: String) async throws {
   let replies = Replies(); let server = try TestService { replies.respond($0) }
   let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-clone-handshake-\(UUID().uuidString)")
   let sockets = URL(fileURLWithPath: "/tmp/agw-clone-\(UUID().uuidString.prefix(8))")
@@ -1340,11 +1678,22 @@ func remoteUnknownOutcomeIsOriginBoundAndExplicitRejectionIsKnown(failure: Strin
       print(json.dumps({'id':'new-repo','path':sys.argv[2]}));sys.exit(0)
   if sys.argv[1]=='workspace':
       pathlib.Path(sys.argv[3]).write_text('{}');sys.exit(0)
+  recent_failure=\(phase == "recent-read" ? "True" : "False")
+  recent_file=pathlib.Path(sys.argv[2]).parents[2]/'recent.json'
+  handshakes=0
   listener=socket.socket(socket.AF_UNIX);listener.bind(sys.argv[-1]);listener.listen(16)
   while True:
       peer,_=listener.accept()
       request=json.loads(peer.makefile('rb').readline());stopping=request['method']=='shutdown_if_idle'
-      peer.sendall((json.dumps({'schema_version':1,'result':{'stopping':True} if stopping else []})+'\\n').encode());peer.close()
+      if request['method']=='list_workspaces':
+          handshakes+=1
+          if recent_failure and handshakes==2:
+              recent_file.unlink();recent_file.mkdir()
+          result=[{'schema_version':1,'id':'clone-project','repositories':[{'id':'new-repo','path':'/tmp/clone-synthetic'}],'groups':[]}] if recent_failure else []
+          response={'schema_version':1,'result':result}
+      elif stopping:response={'schema_version':1,'result':{'stopping':True}}
+      else:response={'schema_version':1,'error':{'code':'git_failed','message':'optional display read failed'}}
+      peer.sendall((json.dumps(response)+'\\n').encode());peer.close()
       if stopping:break
   listener.close();os.unlink(sys.argv[-1])
   """
@@ -1355,10 +1704,18 @@ func remoteUnknownOutcomeIsOriginBoundAndExplicitRejectionIsKnown(failure: Strin
   await store.connect(); let session = store.workspaceSession; let selection = store.selection
   store.commitMessage = "keep this draft"
   let destination = folder.appendingPathComponent("new-repo")
-  do { try await store.cloneRepository(url: "https://gitlab.example/team/repo.git", destination: destination); Issue.record("Expected final handshake failure") }
-  catch StartupFailure.cloneCreated(let path) { #expect(path == destination.path) }
-  #expect(store.workspaceSession == session); #expect(store.socketPath == server.path)
-  #expect(store.selection == selection); #expect(store.commitMessage == "keep this draft")
+  if phase == "handshake" {
+    do { try await store.cloneRepository(url: "https://gitlab.example/team/repo.git", destination: destination); Issue.record("Expected final handshake failure") }
+    catch StartupFailure.cloneCreated(let path) { #expect(path == destination.path) }
+    #expect(store.workspaceSession == session); #expect(store.socketPath == server.path)
+    #expect(store.selection == selection); #expect(store.commitMessage == "keep this draft")
+  } else {
+    try await store.cloneRepository(url: "https://gitlab.example/team/repo.git", destination: destination)
+    #expect(store.workspace?.id == "clone-project"); #expect(store.workspaceSession != session)
+    #expect(store.selection?.repoId == "new-repo")
+    #expect(store.error?.contains("복제와 프로젝트 열기는 완료했습니다") == true)
+    #expect(store.error?.contains("최근 프로젝트 목록") == true)
+  }
   #expect(FileManager.default.fileExists(atPath: destination.path)); #expect(!store.busy)
   #expect(store.submissionWarnings.isEmpty)
   await runtime.stopIdleServices()

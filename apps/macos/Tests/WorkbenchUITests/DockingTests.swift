@@ -1,6 +1,20 @@
 import Foundation
 import Testing
-import WorkbenchUI
+@testable import WorkbenchUI
+
+@Test func splitResizingStartsAtRenderedMinimumAndPersistsReachableRatio() throws {
+  let geometry = DockSplitGeometry(available: 1000, firstMinimum: 360, secondMinimum: 320)
+  #expect(geometry.clampedRatio(0.1) == 0.36)
+  #expect(abs(geometry.resizedRatio(from: 0.1, by: 50) - 0.41) < 0.0001)
+  #expect(geometry.resizedRatio(from: 0.1, by: -500) == 0.36)
+  #expect(geometry.resizedRatio(from: 0.1, by: 2000) == 0.68)
+  let nested = DockSplitGeometry(available: 1000, firstMinimum: 920, secondMinimum: 30)
+  let ratio = nested.resizedRatio(from: 0.5, by: 20)
+  var layout = DockLayout(root: .divided(.horizontal, 0.5, .group([.files]), .group([.diff])))
+  layout = layout.resizing(try #require(layout.root).id, ratio: ratio)
+  guard case .split(_, _, let saved, _, _) = layout.root else { Issue.record("Missing split"); return }
+  #expect(abs(saved - 0.94) < 0.0001)
+}
 
 @Test
 func everyPaneCanSplitOrTabWithEveryOtherPaneWithoutLoss() {

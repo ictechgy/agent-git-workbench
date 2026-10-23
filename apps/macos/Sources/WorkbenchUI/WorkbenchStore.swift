@@ -66,7 +66,9 @@ public final class WorkbenchStore: ObservableObject {
   @Published public private(set) var stashFocusRequest = 0
   @Published public private(set) var events: [OperationEvent] = []
   @Published public private(set) var busy = false
-  @Published public var error: String?
+  @Published public var error: String? {
+    didSet { if error == nil { errorDetails = nil } }
+  }
   @Published public private(set) var errorDetails: String?
   @Published public private(set) var recentWorkspaces: [RecentWorkspace] = []
   @Published public var showingWelcome = true
@@ -208,8 +210,14 @@ public final class WorkbenchStore: ObservableObject {
     let stashes: [GitStash]
     let selectedStashOID: String?
     let stashDetail: StashDetail?
+    let workingReview: WorkingReview?
     let lastUpdated: Date?
   }
+  private struct WorkingReview {
+    let path: String
+    let staged: Bool
+  }
+  private var workingReview: WorkingReview?
   // Keep review data for six recent folders. Small drafts survive review-cache eviction.
   private var locationDrafts: [WorktreeSelection: LocationDraft] = [:]
   private var workspaceDrafts: [String: [WorktreeSelection: LocationDraft]] = [:]
@@ -482,20 +490,24 @@ public final class WorkbenchStore: ObservableObject {
       unresolvedOperationIDs = []
     }
     contextOperationID = restoredContext
-    stashes = []
+    let cached = restoring ? restoredSelection.flatMap { locationCache[$0] } : nil
+    stashes = cached?.stashes ?? []
     stashError = nil
     clearStashReview()
+    selectedStashOID = cached?.selectedStashOID
+    stashDetail = cached?.stashDetail
+    workingReview = cached?.workingReview
     tasks = [:]
     events = []
     eventCursor = 0
     selection = restoredSelection ?? workspace.repositories.first.map { .init(repoId: $0.id) }
-    repository = nil
-    diff = nil
+    repository = cached?.repository
+    diff = cached?.diff
     let restoredDraft = selection.flatMap { locationDrafts[$0] }
     selectedFile = restoredDraft?.selectedFile ?? ""
     staged = restoredDraft?.staged ?? false
     commitMessage = restoredDraft?.commitMessage ?? ""
-    lastUpdated = nil
+    lastUpdated = cached?.lastUpdated
     validatingSelection = true
     showingWelcome = false
     configureTaskContext()
@@ -517,6 +529,7 @@ public final class WorkbenchStore: ObservableObject {
     clearDiffFailure()
     selectionCheckFailed = false
     lastRefreshFailure = nil
+    lastMetadataFailure = nil
     rememberLocation()
     let version = UUID()
     generation = version
@@ -530,6 +543,7 @@ public final class WorkbenchStore: ObservableObject {
     stashError = nil
     selectedStashOID = cached?.selectedStashOID
     stashDetail = cached?.stashDetail
+    workingReview = cached?.workingReview
     repository = cached?.repository
     diff = cached?.diff
     selectedFile = draft?.selectedFile ?? ""
@@ -560,7 +574,8 @@ public final class WorkbenchStore: ObservableObject {
     }
     locationCache[selection] = CachedLocation(
       repository: repository, diff: cachedDiff, stashes: stashes,
-      selectedStashOID: selectedStashOID, stashDetail: stashDetail, lastUpdated: lastUpdated)
+      selectedStashOID: selectedStashOID, stashDetail: stashDetail,
+      workingReview: workingReview, lastUpdated: lastUpdated)
     cacheOrder.removeAll { $0 == selection }
     cacheOrder.append(selection)
     while cacheOrder.count > 6 { locationCache.removeValue(forKey: cacheOrder.removeFirst()) }
@@ -672,23 +687,25 @@ public final class WorkbenchStore: ObservableObject {
           if stashes != entries { stashes = entries }
           if stashError != nil { stashError = nil }
           if let selectedStashOID, !entries.contains(where: { $0.oid == selectedStashOID }) {
+            let previousReview = workingReview
             clearStashReview()
             cancelDiffRead()
             diff = nil
-            selectedFile = ""
+            staged = previousReview?.staged ?? false
+            selectedFile = previousReview?.path ?? ""
             stashError = "선택한 stash가 외부에서 삭제되었습니다. 현재 변경으로 돌아왔습니다."
           }
         } catch {
           guard version == generation else { return }
           stashError = "Stash 목록을 읽지 못했습니다. 새로고침해 주세요."
         }
-        if let opId = location.opId,
-          operationSummary(for: opId)?.repos.first(where: { $0.id == location.repoId })?
-            .hasWorktree != true
+        if let opId = location.opId, !unresolvedOperationIDs.contains(opId),
+          let target = operationSummary(for: opId)?.repos.first(where: { $0.id == location.repoId }),
+          !target.hasWorktree
         {
           if repository != nil { repository = nil }
           if !isViewingStash && diff != nil { diff = nil }
-        } else {
+        } else if !taskInformationUnavailable {
           let status: RepositoryStatus = try await client.call(
             "get_repo_status", params: params(for: location))
           guard version == generation else { return }
@@ -727,7 +744,9 @@ public final class WorkbenchStore: ObservableObject {
       }
       let metadataMessage = metadataFailures.isEmpty ? nil : Array(Set(metadataFailures)).sorted().joined(separator: " ")
         + (taskInformationUnavailable ? " 새로고침으로 작업과 폴더 정보를 확인해 주세요." : " 파일의 현재 상태는 별도로 확인했습니다. 새로고침으로 기록을 다시 불러오세요.")
-      if let metadataMessage, metadataMessage != lastMetadataFailure { error = metadataMessage; errorDetails = nil }
+      if let metadataMessage, metadataMessage != lastMetadataFailure,
+        error == nil || error == lastMetadataFailure || error == lastRefreshFailure
+      { error = metadataMessage; errorDetails = nil }
       if metadataMessage == nil, error == lastMetadataFailure, lastMetadataFailure != nil { error = nil; errorDetails = nil }
       lastMetadataFailure = metadataMessage
       if error == lastRefreshFailure && lastRefreshFailure != nil { error = nil; errorDetails = nil }
@@ -827,14 +846,17 @@ public final class WorkbenchStore: ObservableObject {
   private func clearStashReview() {
     selectedStashOID = nil
     stashDetail = nil
+    workingReview = nil
   }
   public func revealStashes() { stashFocusRequest += 1 }
   public func chooseStash(_ stash: GitStash) {
     guard !busy else { return }
     clearDiffFailure()
     cancelDiffRead()
+    if !isViewingStash { workingReview = WorkingReview(path: selectedFile, staged: staged) }
     selectedStashOID = stash.oid
     stashDetail = nil
+    staged = false
     selectedFile = ""
     diff = nil
     Task { await loadStashDetail() }
@@ -862,10 +884,14 @@ public final class WorkbenchStore: ObservableObject {
   }
   public func showWorkingChanges() {
     clearDiffFailure()
+    let previousReview = workingReview
     clearStashReview()
     cancelDiffRead()
-    staged = false
-    selectedFile = visibleFiles.first?.path ?? ""
+    staged = previousReview?.staged ?? false
+    selectedFile = previousReview?.path ?? ""
+    if !visibleFiles.contains(where: { $0.path == selectedFile }) {
+      selectedFile = visibleFiles.first?.path ?? ""
+    }
     diff = nil
     Task { await loadDiff() }
   }
@@ -875,9 +901,11 @@ public final class WorkbenchStore: ObservableObject {
   }
   public func stageHunk(_ index: Int, from diff: FileDiff, at selection: WorktreeSelection) async {
     guard let client, selection == self.selection, canEdit, canUseRenderedDiff,
+      diff.canStageHunks, self.diff?.canStageHunks == true, diff.hunks.indices.contains(index),
       diff.contentIdentity == self.diff?.contentIdentity, diff.snapshotHash == repository?.snapshotHash,
       diff.path == selectedFile, diff.staged == staged else {
       error = "변경이 바뀌었거나 확인 중입니다. 현재 변경을 다시 확인한 뒤 스테이징하세요."
+      errorDetails = nil
       return
     }
     var values = params(for: selection)
@@ -886,7 +914,7 @@ public final class WorkbenchStore: ObservableObject {
     values["hunk_index"] = .number(Double(index))
     values["snapshot_hash"] = .string(diff.snapshotHash)
     values["diff_hash"] = .string(diff.contentIdentity)
-    await mutation {
+    await mutation("stage_hunk", action: "부분 \(diff.staged ? "스테이징 취소" : "스테이징") · \(diff.path)") {
       let _: MutationResult = try await client.call("stage_hunk", params: values)
     }
   }
@@ -900,7 +928,7 @@ public final class WorkbenchStore: ObservableObject {
     let submittedMessage = commitMessage
     let submittedRevision = commitDraft.revision
     values["message"] = .string(submittedMessage)
-    await mutation {
+    await mutation("commit", action: "커밋") {
       let _: MutationResult = try await client.call("commit", params: values)
       if self.commitDraft.revision == submittedRevision { self.commitMessage = "" }
     }
@@ -915,13 +943,14 @@ public final class WorkbenchStore: ObservableObject {
     guard (method == "materialize" && eligibility.materialize)
       || (method == "retry_operation" && eligibility.retry)
       || (method == "cancel_operation" && eligibility.cancel) else { return }
-    await mutation {
+    await mutation(method) {
       let _: WorkbenchOperation = try await client.call(method, params: ["op_id": .string(op.id)])
     }
   }
   public func planTask(group: String, label: String, slug: String, mode: String) async throws
     -> WorkspaceTaskPlan
   {
+    guard !busy, !remoteBusy else { throw UIError.busy }
     guard let client, let socket = connectedSocketPath else { throw UIError.notConnected }
     let session = planSession
     guard socketPath == socket else { throw UIError.workspaceChanged }
@@ -949,6 +978,7 @@ public final class WorkbenchStore: ObservableObject {
       ])
   }
   public func executePlan(_ plan: WorkspaceTaskPlan, key: String) async throws {
+    guard !busy, !remoteBusy else { throw UIError.busy }
     guard let client else { throw UIError.notConnected }
     guard plan.socket == socketPath, socketPath == connectedSocketPath else { throw UIError.workspaceChanged }
     guard plan.session == planSession else { throw UIError.planInvalidated }
@@ -978,19 +1008,38 @@ public final class WorkbenchStore: ObservableObject {
   public func dismissSubmissionWarning(_ id: String) {
     submissionWarnings.removeAll { $0.id == id }
   }
-  private func mutation(_ work: () async throws -> Void) async {
+  private func mutation(_ method: String, action: String? = nil, _ work: () async throws -> Void) async {
+    let originSocket = connectedSocketPath ?? socketPath
+    let originGeneration = generation
+    let originSelection = selection
+    let originTitle = workspaceTitle
+    let originPath = repository?.path ?? currentWorkspace?.repositoryPath
+      ?? workspace?.repositories.first?.path ?? originSocket
+    let warningID = originSocket + ":" + method + ":" + UUID().uuidString
     busy = true
     error = nil
     defer { busy = false }
     do {
       try await work()
-      while refreshing { try? await Task.sleep(for: .milliseconds(20)) }
-      await refresh()
     } catch {
-      report(error)
-      while refreshing { try? await Task.sleep(for: .milliseconds(20)) }
-      await refresh()
+      let service = error as? ServiceFailure
+      let unknown = action != nil && (service == nil
+        || ["git_write_outcome_unknown", "write_outcome_unknown"].contains(service?.code ?? ""))
+      if unknown, let action {
+        submissionWarnings.append(TaskSubmissionWarning(id: warningID, workspaceTitle: originTitle,
+          workspacePath: originPath, message: "\(action)\n\(UIError.gitWriteOutcomeUnknown.localizedDescription)"))
+      }
+      if generation == originGeneration, selection == originSelection, socketPath == originSocket {
+        report(unknown ? UIError.gitWriteOutcomeUnknown : error)
+      }
     }
+    // Reading the display after a confirmed reply cannot change the write's outcome.
+    while refreshing {
+      guard generation == originGeneration, selection == originSelection, socketPath == originSocket else { return }
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+    guard generation == originGeneration, selection == originSelection, socketPath == originSocket else { return }
+    await refresh()
   }
   private func params(for value: WorktreeSelection) -> [String: JSONValue] {
     var params: [String: JSONValue] = ["repo_id": .string(value.repoId)]
@@ -1010,11 +1059,13 @@ public final class WorkbenchStore: ObservableObject {
 }
 
 enum UIError: LocalizedError {
-  case staleRemote, remoteOutcomeUnknown, emptyWorkspace, notConnected, operationIdentityMismatch, workspaceChanged, workspaceChangedAfterSubmission, submissionOutcomeUnknown, planInvalidated
+  case busy, staleRemote, remoteOutcomeUnknown, gitWriteOutcomeUnknown, emptyWorkspace, notConnected, operationIdentityMismatch, workspaceChanged, workspaceChangedAfterSubmission, submissionOutcomeUnknown, planInvalidated
   var errorDescription: String? {
     switch self {
+    case .busy: "다른 작업을 진행 중입니다. 완료된 뒤 다시 시도해 주세요."
     case .staleRemote: "저장소나 원격 정보가 바뀌었습니다. 원격 정보를 새로 읽고 다시 확인해 주세요."
     case .remoteOutcomeUnknown: "원격 작업의 완료 여부를 확인하지 못했습니다. 같은 요청을 반복하기 전에 이 프로젝트의 Git 상태와 서버의 브랜치를 확인해 주세요."
+    case .gitWriteOutcomeUnknown: "Git 변경의 완료 여부를 확인하지 못했습니다. 같은 동작을 반복하기 전에 이 폴더의 변경 상태와 Git 기록을 확인해 주세요."
     case .emptyWorkspace: "등록된 워크스페이스가 없습니다."
     case .notConnected: "로컬 서비스에 먼저 연결하세요."
     case .operationIdentityMismatch: "선택한 작업과 다른 정보가 반환되었습니다. 새로고침해 주세요."
@@ -1061,8 +1112,10 @@ extension WorkbenchStore {
   public var remoteBusy: Bool { currentRemoteScope.map { remoteMutations.contains($0) } ?? false }
   public var canUseRemotes: Bool {
     !busy && !validatingSelection && !taskPreparationIncomplete && !hasRunningOperation
-      && currentRemoteScope != nil && repository != nil
+      && currentRemoteScope != nil && repository != nil && remoteState != nil
+      && remoteScope == currentRemoteScope && remoteSnapshot == repository?.snapshotHash
   }
+  public func reportRemote(_ failure: any Error) { remoteError = UserFacingFailure.message(failure) }
   private func invalidateRemoteContext() {
     remoteReadID = UUID(); remoteState = nil; remoteScope = nil; remoteSnapshot = nil
     remoteLoading = false; remoteError = nil; remoteMessage = nil
@@ -1148,14 +1201,20 @@ extension WorkbenchStore {
     await loadRemoteState()
   }
   public func cloneRepository(url: String, destination: URL) async throws {
-    guard !busy else { throw UIError.staleRemote }
+    guard !busy else { throw UIError.busy }
     busy = true; startupMessage = "저장소 복제 중…"
     defer { busy = false; startupMessage = nil }
     do {
       let session = try await runtime.cloneRepository(url: url, destination: destination)
       do { try await connectToService(socket: session.socketPath, recent: session.recent) }
       catch { throw StartupFailure.cloneCreated(session.recent.repositoryPath) }
-      recentWorkspaces = try await runtime.recentWorkspaces()
+      // The clone and workspace handshake are already confirmed. A recent-list
+      // read failure is display metadata and must not invite a duplicate clone.
+      do { recentWorkspaces = try await runtime.recentWorkspaces() }
+      catch {
+        errorDetails = error.localizedDescription
+        self.error = "복제와 프로젝트 열기는 완료했습니다. 최근 프로젝트 목록을 읽지 못했습니다."
+      }
     } catch {
       if case StartupFailure.cloneOutcomeUnknown(let path) = error {
         submissionWarnings.append(TaskSubmissionWarning(id: "clone:" + UUID().uuidString,

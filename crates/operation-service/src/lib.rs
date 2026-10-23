@@ -978,7 +978,7 @@ impl Service {
                         ensure!(digest(&git::snapshot(&path)?)?==string("snapshot_hash")?, "stale_snapshot");
                         let message=string("message")?; ensure!(!message.trim().is_empty() && message.len()<=10000, "invalid_commit_message");
                         ensure!(!git::git_bytes(&path,&["diff","--cached","--name-only"])?.is_empty(), "empty_index");
-                        git::command(&path,&["commit","-F","-"],Some(message.as_bytes()))?;
+                        git::command(&path,&["commit","--cleanup=verbatim","-F","-"],Some(message.as_bytes()))?;
                         let view = git::fresh_deadline(std::time::Duration::from_secs(15), || git::view(&path)).ok();
                         Ok(json!({"status":"committed","head":view.as_ref().map(|v| &v.snapshot.head),"refresh_required":view.is_none(),"view":view}))
                     }

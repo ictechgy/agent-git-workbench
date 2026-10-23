@@ -14,10 +14,10 @@
 
 ## 배포·호환성
 
-- `0.1.0-alpha.2`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
+- `0.1.0-alpha.3`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
 - 선언된 최소 대상은 macOS 14이지만 실행 검증은 macOS 27.0.1에서만 했습니다. macOS 14–26에서의 호환성은 아직 검증하지 않았습니다.
 - 앱과 Rust 엔진은 함께 배포하지만 Git은 포함하지 않습니다. 런타임은 `/usr/bin:/bin:/usr/sbin:/sbin` 경로를 사용하므로 Apple Command Line Tools 또는 Xcode의 Git이 필요합니다. Homebrew 전용 경로의 Git은 사용하지 않습니다. 내장 예제의 준비 스크립트는 `python3`도 실행합니다.
-- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.2.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
+- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.3.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
 - 자동 업데이트 기능은 없습니다. 새 버전은 GitHub Releases에서 다운로드해 교체합니다.
 - 라이선스는 미확정이며 현재 Cargo 메타데이터는 `UNLICENSED`입니다.
 
@@ -36,6 +36,7 @@
 - 사용자 SSH config·별칭·ProxyCommand·임의 identity 경로, 대화형 인증, 임의 credential helper는 사용하지 않습니다. 파일 경로·`file://`·`git://`·외부 remote helper·URL rewrite·방향별 복수 URL·partial/promisor 저장소와 보안을 바꾸는 HTTP 설정은 거부합니다.
 - Fetch는 선택 원격의 브랜치 head만 갱신·prune합니다. 태그·서브모듈 동기화는 포함하지 않습니다. Pull은 깨끗한 폴더에서 빨리 감기로만, push는 확인한 commit을 한 브랜치로만 전송합니다.
 - 원격 설정과 추적 ref는 연결된 worktree에 공유됩니다. 확인 이후 URL·로컬 상태·원격 ref가 바뀌면 재확인이 필요합니다. 응답을 잃거나 시간이 초과되면 Git과 서버 상태를 확인하기 전 재시도하지 마세요. 클라이언트를 닫아도 서버 작업 취소가 확정되는 것은 아닙니다.
+- Clone bootstrap helper가 강제 종료되면 별도 process group의 Git 자식이 계속 실행되거나 대상 옆의 앱 소유 staging 폴더가 남을 수 있습니다. timeout은 모든 자식 종료·정리 완료를 보증하지 않습니다. 종료된 helper가 뒤늦게 staging을 게시할 수는 없지만, 대상·부모 폴더와 Git·서버 상태를 확인하기 전 재시도하지 마세요. 자동 재실행·잔여 폴더 삭제는 하지 않습니다.
 - [지원 URL·실행 경계·복구 안내](remotes.md)에서 자세한 정책을 확인하세요.
 
 ## 표시·성능 경계
@@ -65,5 +66,6 @@
 
 - 알려진 workspace의 설정 파일이 사라지면 journal을 새 workspace로 조용히 대체하지 않고 실패합니다. 현재 다시 열라는 안내만으로 해결되지 않을 수 있으며, 기존 설정을 복구해야 합니다.
 - 안전하게 읽을 수 없는 kind record는 해당 항목 전체를 건너뜁니다. 그 항목이 복원하려던 workspace라면 기존 journal을 찾지 못하고 새 등록을 만들 수 있습니다. 손상된 등록의 자동 복구·병합 UI는 없습니다.
+- 저장소 폴더를 이동하거나 이름을 바꾸면 기존 경로의 등록을 자동 이전하지 않습니다. 새 경로를 열면 별도 workspace와 journal을 만들 수 있으며 기존 journal은 남습니다. 기존 Task가 기록한 경로까지 자동으로 고치는 기능은 없습니다.
 
 OS 마우스·키보드 입력과 VoiceOver, macOS 14 실행, 대형 실제 저장소 성능은 별도 검증이 필요합니다.

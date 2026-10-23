@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 import WorkbenchProtocol
 @testable import WorkbenchUI
@@ -62,4 +63,10 @@ private func receipt(kind: String = "git_check", after: Any = "code-1") throws -
   let data = Data(#"{"code":"invalid_task_context","message":"limit"}"#.utf8)
   let failure = try JSONDecoder().decode(ServiceFailure.self, from: data)
   #expect(UserFacingFailure.message(failure).contains("완료 조건"))
+  let blockedPull = UserFacingFailure.message(ServiceFailure(code: "remote_pull_blocked", message: "MERGE_HEAD"))
+  #expect(blockedPull.contains("Pull하지 않았습니다")); #expect(blockedPull.contains("진행 중 Git 작업"))
+  for action in ["수신", "전송"] {
+    #expect(UserFacingFailure.message(TransportFailure.system(action, EAGAIN)).contains("응답이 지연"))
+  }
+  #expect(UserFacingFailure.message(TransportFailure.system("연결", EAGAIN)).contains("연결하지 못했습니다"))
 }

@@ -143,7 +143,7 @@ public indirect enum DockNode: Codable, Equatable, Sendable, Identifiable {
           return nil
         }
         return .split(
-          id: id, axis: axis, ratio: ratio.isFinite ? min(0.9, max(0.1, ratio)) : 0.5, first: a,
+          id: id, axis: axis, ratio: ratio.isFinite ? min(1, max(0, ratio)) : 0.5, first: a,
           second: b)
       }
     }

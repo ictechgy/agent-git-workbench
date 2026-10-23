@@ -23,6 +23,7 @@ English
 2. Eject this disk image, then open River from Applications.
 Requires macOS 14 or later. This is an early alpha release.
 Apple command-line Git is required. Check it with /usr/bin/git --version.
+Remote operations require Apple Git 2.41 or later.
 If Git is unavailable, run xcode-select --install in Terminal to install Apple's
 Command Line Tools. Full Xcode is not required to use River.
 The built-in example also requires python3 for its preparation recipes.
@@ -33,6 +34,7 @@ Command Line Tools: https://developer.apple.com/documentation/xcode/installing-t
 2. 이 디스크 이미지를 추출한 뒤 응용 프로그램 폴더에서 River를 여세요.
 macOS 14 이상이 필요합니다. 초기 알파 릴리스입니다.
 Apple 명령줄 Git이 필요합니다. /usr/bin/git --version으로 확인하세요.
+원격 작업에는 Apple Git 2.41 이상이 필요합니다.
 Git을 사용할 수 없으면 터미널에서 xcode-select --install을 실행해 Apple의
 Command Line Tools를 설치하세요. River 사용에 전체 Xcode는 필요하지 않습니다.
 앱의 기본 예제는 준비 레시피를 실행할 때 python3도 필요합니다.
@@ -71,16 +73,22 @@ def output_lock(output):
 
 def source_snapshot(root=None):
     root = ROOT if root is None else root
-    head = run("git", "rev-parse", "HEAD", cwd=root, capture_output=True, text=True).stdout.strip()
-    status = run("git", "status", "--porcelain=v1", "-z", "--untracked-files=no", cwd=root,
+    # A caller's Git override must never attest a repository other than the one
+    # the compiler reads. This also removes config/index/object overrides.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+    def git(*argv, **kwargs):
+        return run("git", "-C", root, *argv, cwd=root, env=environment, **kwargs)
+
+    head = git("rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=no",
                  capture_output=True).stdout
-    patch = run("git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--",
-                cwd=root, capture_output=True).stdout
+    patch = git("diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--",
+                capture_output=True).stdout
     # Include ignored files here too: an ignored Swift/Rust file can still enter a build.
-    untracked = run("git", "ls-files", "--others", "-z", "--", "apps/macos/Sources", "crates",
-                    cwd=root, capture_output=True).stdout
-    if run("git", "rev-parse", "HEAD", cwd=root,
-           capture_output=True, text=True).stdout.strip() != head:
+    untracked = git("ls-files", "--others", "-z", "--", "apps/macos/Sources", "crates", ".cargo",
+                    capture_output=True).stdout
+    if git("rev-parse", "HEAD", capture_output=True, text=True).stdout.strip() != head:
         raise ValueError("source HEAD changed while capturing build provenance")
     return {"kind": "clean-git-build", "git_commit": head, "tracked_status": os.fsdecode(status),
             "tracked_patch_sha256": hashlib.sha256(patch).hexdigest(),
@@ -92,7 +100,7 @@ def clean_source_snapshot(root=None):
     if initial["tracked_status"]:
         raise ValueError("release packaging requires a clean tracked source tree; commit changes first")
     if initial["untracked_runtime_files"]:
-        raise ValueError("release packaging requires tracked runtime files under apps/macos/Sources and crates")
+        raise ValueError("release packaging found untracked build inputs under apps/macos/Sources, crates or .cargo")
     return initial
 
 
@@ -307,14 +315,16 @@ def package_locked(args, output, expected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="0.1.0-alpha.1")
-    parser.add_argument("--build-number", default="2")
+    parser.add_argument("--version", help="explicit release SemVer (required when packaging)")
+    parser.add_argument("--build-number", help="explicit positive Apple build number (required when packaging)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--app", type=Path, help="package an existing release bundle; preserve its signature")
     parser.add_argument("--sign-identity", help="Developer ID Application identity; default is ad-hoc")
     parser.add_argument("--notary-profile", help="existing notarytool Keychain profile (requires Developer ID)")
     parser.add_argument("--verify-dmg", type=Path, help="only verify and mount/copy an existing DMG")
     args = parser.parse_args()
+    if not args.verify_dmg and (args.version is None or args.build_number is None):
+        parser.error("--version and --build-number are required when packaging")
     try:
         if args.verify_dmg:
             print(json.dumps(verify_dmg(args.verify_dmg.expanduser().resolve()), indent=2))

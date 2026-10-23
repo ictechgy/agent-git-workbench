@@ -134,6 +134,11 @@ struct RemotePopover: View {
         selectedRemote = ""; targetBranch = ""; editing = false
         await store.loadRemoteState(); chooseDefault()
       }
+      .onChange(of: store.repository?.snapshotHash) { _, _ in
+        // Revalidate working-tree edits while preserving the user's URL/branch draft.
+        guard !store.remoteBusy else { return }
+        Task { await store.loadRemoteState() }
+      }
       .onChange(of: selectedRemote) { _, _ in chooseBranch() }
       .onChange(of: store.remoteState) { _, _ in chooseDefault() }
       .sheet(item: $pending) { item in
@@ -159,13 +164,13 @@ struct RemotePopover: View {
       let plan = try store.remotePlan(action, remote: selectedRemote, branch: targetBranch)
       if action == .fetch { Task { try? await store.executeRemote(plan) } }
       else { pending = RemoteConfirmation(plan: plan) }
-    } catch { store.report(error) }
+    } catch { store.reportRemote(error) }
   }
   private func configure(_ action: String, name: String) {
     do {
       pending = RemoteConfirmation(plan: try store.remotePlan(.configure, remote: name), configuration: action,
         fetchURL: action == "remove" ? nil : fetchURL, pushURL: action == "remove" ? nil : pushURL)
-    } catch { store.report(error) }
+    } catch { store.reportRemote(error) }
   }
 }
 

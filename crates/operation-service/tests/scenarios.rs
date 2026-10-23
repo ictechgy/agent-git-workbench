@@ -34,6 +34,44 @@ fn context_save(repo: &str, revision: u64) -> Value {
 }
 
 #[test]
+fn commit_preserves_the_reviewed_message_under_repository_cleanup_config() {
+    let f = Fixture::new();
+    let path = &f.workspace.repo("ios-app").unwrap().path;
+    git::git(path, &["config", "commit.cleanup", "strip"]).unwrap();
+    fs::write(path.join("notes.txt"), "message regression\n").unwrap();
+    git::git(path, &["add", "notes.txt"]).unwrap();
+    let message = "Preserve this message\n\n# keep me\n\n";
+    f.rpc("commit", json!({"repo_id":"ios-app","message":message,"snapshot_hash":digest(&git::snapshot(path).unwrap()).unwrap()}));
+    let object = git::git(path, &["cat-file", "commit", "HEAD"]).unwrap();
+    assert_eq!(object.split_once("\n\n").unwrap().1, message);
+}
+
+#[test]
+fn diff_keeps_blank_context_prefixes_under_repository_config() {
+    let f = Fixture::new();
+    let path = &f.workspace.repo("ios-app").unwrap().path;
+    fs::write(path.join("notes.txt"), "before\n\nold\nafter\n").unwrap();
+    git::git(path, &["add", "notes.txt"]).unwrap();
+    git::git(path, &["commit", "-m", "blank context baseline"]).unwrap();
+    git::git(path, &["config", "diff.suppressBlankEmpty", "true"]).unwrap();
+    fs::write(path.join("notes.txt"), "before\n\nnew\nafter\n").unwrap();
+    let diff = git::diff(path, "notes.txt", false).unwrap();
+    assert!(
+        diff.text.contains(" before\n \n-old\n+new\n after\n"),
+        "{}",
+        diff.text
+    );
+    git::git(path, &["stash", "push", "--", "notes.txt"]).unwrap();
+    let oid = git::git(path, &["rev-parse", "stash@{0}"]).unwrap();
+    let diff = git::stash_diff(path, oid.trim(), "notes.txt").unwrap();
+    assert!(
+        diff.text.contains(" before\n \n-old\n+new\n after\n"),
+        "{}",
+        diff.text
+    );
+}
+
+#[test]
 fn malformed_optional_scope_never_falls_back_to_the_original_repository() {
     let f = Fixture::new();
     let op = f.execute(Mode::Materialize, "typed-rpc-scope");

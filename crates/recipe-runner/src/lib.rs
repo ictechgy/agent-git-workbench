@@ -5,7 +5,7 @@ use std::{
     os::fd::AsRawFd,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -178,21 +178,31 @@ pub fn run(
     let status = loop {
         // Observe exit without reaping: the leader's PID/PGID cannot be reused
         // until descendants are signalled and Child::wait finally reaps it.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
+        let exited = observe_recipe_exit(&mut child, |pid| {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                Ok(info.si_pid == pid as i32)
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+        let exited = match exited {
+            Ok(exited) => exited,
+            Err(error) => break Err(error),
         };
-        ensure!(result == 0, "recipe_wait_failed");
-        if info.si_pid == child.id() as i32 {
+        if exited {
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
-            break child.wait()?;
+            break child.wait().context("recipe_wait_failed");
         }
         let stop = cancelled.load(Ordering::SeqCst)
             || start.elapsed() >= Duration::from_secs(recipe.timeout_seconds)
@@ -217,6 +227,7 @@ pub fn run(
     for reader in readers {
         let _ = reader.join();
     }
+    let status = status?;
     if cancelled.load(Ordering::SeqCst) {
         bail!("cancelled");
     }
@@ -226,11 +237,64 @@ pub fn run(
     Ok(())
 }
 
+fn observe_recipe_exit(
+    child: &mut Child,
+    mut observe: impl FnMut(u32) -> std::io::Result<bool>,
+) -> Result<bool> {
+    loop {
+        match observe(child.id()) {
+            Ok(exited) => return Ok(exited),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                // Confirm this is still our live, unreaped child before sending
+                // a group signal; ECHILD must never signal a reused PID/PGID.
+                if matches!(child.try_wait(), Ok(None)) {
+                    unsafe {
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
+                    let _ = child.wait();
+                }
+                bail!("recipe_wait_failed");
+            }
+        }
+    }
+}
+
 trait BoxReader {
     fn map_reader(self) -> Box<dyn Read + Send>;
 }
 impl<T: Read + Send + 'static> BoxReader for T {
     fn map_reader(self) -> Box<dyn Read + Send> {
         Box::new(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn interrupted_wait_retries_and_fatal_wait_reaps_owned_child() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut attempts = 0;
+        let exited = observe_recipe_exit(&mut child, |_| {
+            attempts += 1;
+            if attempts <= 2 {
+                Err(std::io::ErrorKind::Interrupted.into())
+            } else {
+                Ok(false)
+            }
+        })
+        .unwrap();
+        assert!(!exited);
+        assert_eq!(attempts, 3);
+        let error =
+            observe_recipe_exit(&mut child, |_| Err(std::io::ErrorKind::InvalidInput.into()))
+                .unwrap_err();
+        assert_eq!(error.to_string(), "recipe_wait_failed");
+        assert!(!child.try_wait().unwrap().unwrap().success());
     }
 }

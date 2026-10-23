@@ -14,7 +14,7 @@ The app UI and detailed guides are currently in Korean. English translations of 
 
 ## Install on macOS
 
-**[Download River 0.1.0-alpha.2 for Apple Silicon](https://github.com/ictechgy/river/releases/download/v0.1.0-alpha.2/River-0.1.0-alpha.2-macos-arm64.dmg)** · [Release notes and checksums](https://github.com/ictechgy/river/releases/tag/v0.1.0-alpha.2)
+**[Download River 0.1.0-alpha.3 for Apple Silicon](https://github.com/ictechgy/river/releases/download/v0.1.0-alpha.3/River-0.1.0-alpha.3-macos-arm64.dmg)** · [Release notes and checksums](https://github.com/ictechgy/river/releases/tag/v0.1.0-alpha.3)
 
 - **Apple Silicon (arm64) only.** This release does not include an Intel build.
 - **macOS 14 or later is the declared target.** Runtime testing has only covered macOS 27.0.1; compatibility with older supported versions has not been verified.
@@ -25,7 +25,7 @@ The app UI and detailed guides are currently in Korean. English translations of 
 3. Eject the River disk image, then open **River** from **Applications**.
 4. Choose **Explore the example** (`예제로 먼저 둘러보기`) to try synthetic repositories before opening your own project.
 
-The app, bundled engine, and DMG have verified Developer ID signatures. This alpha is **not notarized by Apple**, so macOS may block its first launch. See the [release notes](docs/releases/v0.1.0-alpha.2.md) for verification details.
+The app, bundled engine, and DMG have verified Developer ID signatures. This alpha is **not notarized by Apple**, so macOS may block its first launch. See the [release notes](docs/releases/v0.1.0-alpha.3.md) for verification details.
 
 If macOS blocks opening because it cannot verify the developer or check the app, review the release status and source first. If you choose to continue, use **System Settings → Privacy & Security → Open Anyway** after attempting to open River, then confirm **Open**, as described in [Apple's guide](https://support.apple.com/en-us/102445).
 
@@ -90,7 +90,7 @@ Running a new task for a project registered with **Open repository…** creates 
 - **Connect a remote:** Open **Remote** (`원격`) beside the current folder to manage URLs and synchronize branches. Pull and push show their exact targets before submission. Clone is available from the welcome screen and application menu. Authentication uses existing SSH agent/default identities and known-host files, or Apple's Git keychain helper for HTTPS; provider login and custom SSH aliases/helpers are not included. See the [remote guide](docs/remotes.md).
 - **Separate checks from reports:** **Whitespace and conflict-marker check** (`공백 · 충돌 마커 검사`) runs `git diff --check` on tracked and staged changes and checks Git conflict and in-progress operation state. It does not build or test the project, or inspect untracked file contents or submodule contents.
 
-Shortcuts: `⌘O` open repository · `⌘N` new task · `⌘R` refresh · `⌘↩` commit · `⌘⌥L` layout.
+Shortcuts: `⌘O` open repository · `⌘N` new task · `⌘R` refresh · `⌘⌥I` open the commit pane · `⌘↩` commit while that pane is active · `⌘⌥L` layout.
 
 Settings, recent projects, and the task journal live in `~/Library/Application Support/AgentGitWorkbench`. The recent menu holds up to 30 entries; existing workspace registrations are looked up separately. Restoration depends on those registrations being readable.
 
@@ -102,7 +102,7 @@ Settings, recent projects, and the task journal live in `~/Library/Application S
 - **Preparation and writes:** Working directories are prepared without changing the original checkout. A changed source snapshot or trust basis stops execution; there is no silent replanning or recovery through reset/clean. Recipes are not an OS security sandbox.
 - **Display and resources:** Graph and branch history show at most 80 recent commits. Diff display is capped at 5,000 lines and 512 KiB. Speed, memory, and energy use on large repositories have not been measured.
 - **Recovery and refresh:** Lost preparation responses leave an origin-project notice for the app session; check that project's task list and Git state before repeating work. These notices do not survive an app restart. Use Refresh after changing Git attributes or diff settings. A read already started in the engine may continue after the client cancels it.
-- **Distribution and validation:** The current prerelease DMG is for Apple Silicon. See its [release notes](docs/releases/v0.1.0-alpha.2.md) for signature and notarization status. Intel builds, runtime testing on macOS 14–26, OS-level input testing, and VoiceOver validation are not complete.
+- **Distribution and validation:** The current prerelease DMG is for Apple Silicon. See its [release notes](docs/releases/v0.1.0-alpha.3.md) for signature and notarization status. Intel builds, runtime testing on macOS 14–26, OS-level input testing, and VoiceOver validation are not complete.
 
 See [limitations and known issues (Korean)](docs/limitations.md) for details.
 
@@ -131,7 +131,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-On 2026-10-23, **91 Rust tests and 74 Swift tests** passed in the developer checkout in the environment above. Synthetic CLI/native-protocol scenarios and read-only public GitHub/GitLab clone/fetch checks also passed. There is no CI yet. These results do not establish behavior on real user repositories or performance on large repositories.
+On 2026-10-23, **101 Rust tests and 96 Swift tests** passed in the developer checkout in the environment above. Synthetic CLI/native-protocol scenarios and read-only public GitHub/GitLab clone/fetch checks also passed. There is no CI yet. These results do not establish behavior on real user repositories or performance on large repositories.
 
 Detailed guides are currently in Korean:
 

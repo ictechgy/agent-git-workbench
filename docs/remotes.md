@@ -36,7 +36,7 @@ If a response is lost or a write times out, River reports an unknown outcome tie
 
 River serializes its own writes through the common Git-directory lock. External Git/configuration writers do not participate in that lock. State checks detect observed drift; they are not isolation against an arbitrary process rewriting Git configuration between validation and Git execution.
 
-Clone first creates an app-owned sibling staging folder without checkout or templates. After validating filters it checks out files, then publishes using a no-replace rename. Failure cleans only its own staging directory. There is no recursive submodule initialization.
+Clone first creates an app-owned sibling staging folder without checkout or templates. After validating filters it checks out files, then publishes using a no-replace rename. A normal failure cleans only its own staging directory. If the bootstrap helper is forcibly terminated, its Git child may continue in its own process group and an app-owned staging folder may remain beside the destination. A timeout or lost response does not prove that every child stopped or that cleanup completed. Inspect the destination, its parent and Git/server state before retrying; River does not automatically replay the clone or remove these leftovers. The terminated helper cannot subsequently publish the staging folder. There is no recursive submodule initialization.
 
 ## Wire contract
 

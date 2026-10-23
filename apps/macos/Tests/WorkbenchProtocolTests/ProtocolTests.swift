@@ -28,6 +28,24 @@ import Testing
   #expect(hunk.split[4].after?.number == 35)
 }
 
+@Test func diffDisplayMakesEmbeddedLineControlsVisibleWithoutChangingSource() {
+  let original = "old\rhidden\u{b}vertical\u{c}page\u{85}next\u{2028}line\u{2029}paragraph\u{202e}reversed\t끝"
+  let hunk = DiffLines.parse(["@@ -1 +1 @@\n-\(original)\n+new\n"])[0]
+  #expect(hunk.split[0].before?.text == original)
+  #expect(hunk.split[0].after?.text == "new")
+  let display = DiffLines.displayText(original)
+  #expect(display == "old␍hidden␋vertical␌page⟨U+0085⟩next⟨U+2028⟩line⟨U+2029⟩paragraph⟨U+202E⟩reversed\t끝")
+  #expect(!display.unicodeScalars.contains { [0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029].contains($0.value) })
+}
+
+@Test func diffMarkersRemainSeparateFromLeadingCombiningSourceScalars() {
+  let hunk = DiffLines.parse(["@@ -1,2 +1,2 @@\n \u{301}context\n-\u{301}before\n+\u{301}after\n"])[0]
+  #expect(hunk.unified.map(\.kind) == [.context, .deletion, .addition])
+  #expect(hunk.unified.map(\.text) == ["\u{301}context", "\u{301}before", "\u{301}after"])
+  #expect(hunk.split[1].before?.number == 2)
+  #expect(hunk.split[1].after?.number == 2)
+}
+
 @Test func noNewlineMetadataDoesNotConsumeSourceLines() {
   let text =
     "@@ -1 +1 @@\n-before\n\\ No newline at end of file\n+after\n\\ No newline at end of file\n"

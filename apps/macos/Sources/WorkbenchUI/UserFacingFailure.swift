@@ -11,7 +11,9 @@ enum UserFacingFailure {
       switch transport {
       case .oversizedReply: return "표시할 변경 내용이 너무 큽니다. 파일을 나누어 검토하거나 Git에서 확인해 주세요."
       case .unsupportedSchema: return "앱과 작업 엔진의 버전이 맞지 않습니다. 업데이트한 앱을 다시 열어 주세요."
-      case .system(_, let code) where code == ETIMEDOUT: return "작업 엔진의 응답이 지연되었습니다. 현재 변경 상태를 새로고침한 뒤 다시 시도해 주세요."
+      case .system(let action, let code) where code == ETIMEDOUT
+        || (code == EAGAIN && ["수신", "전송"].contains(action)):
+        return "작업 엔진의 응답이 지연되었습니다. 현재 변경 상태를 새로고침한 뒤 다시 시도해 주세요."
       case .oversizedRequest: return "입력 내용이 요청 크기 제한을 넘었습니다. 내용을 줄여 다시 시도해 주세요."
       case .invalidReply: return "작업 엔진의 응답을 읽지 못했습니다. 현재 변경 상태를 새로고침해 주세요."
       default: return "작업 엔진에 연결하지 못했습니다. ‘다시 연결’을 눌러 작업을 이어가세요."
@@ -28,6 +30,7 @@ enum UserFacingFailure {
       case "invalid_remote_fetch_result": return "받아 온 브랜치 정보를 안전하게 확인하지 못했습니다. Git 버전과 원격 상태를 확인한 뒤 새로고침해 주세요."
       case "remote_branch_missing": return "원격 저장소에 해당 브랜치가 없습니다. Fetch 후 대상 브랜치를 다시 선택해 주세요."
       case "remote_worktree_dirty": return "현재 폴더의 변경을 커밋하거나 정리한 뒤 Pull해 주세요."
+      case "remote_pull_blocked": return "Git 작업이 진행 중이거나 작업 폴더 상태를 안전하게 확인하지 못해 Pull하지 않았습니다. 현재 변경과 충돌·진행 중 Git 작업을 확인하고 정리한 뒤 새로고침해 주세요."
       case "remote_pull_not_fast_forward": return "로컬과 원격 이력이 갈라져 있어 Pull하지 않았습니다. 별도로 병합하거나 rebase한 뒤 다시 확인해 주세요."
       case "remote_push_rejected": return "서버가 Push를 거절했습니다. 원격의 새 커밋이나 브랜치 보호 규칙을 확인해 주세요."
       case "remote_connection_failed": return "원격 서버에 연결하지 못했습니다. URL·권한과 SSH 키·서버 신뢰 또는 macOS Git Keychain 인증을 확인해 주세요."

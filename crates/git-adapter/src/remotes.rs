@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::Duration,
@@ -43,8 +45,11 @@ fn config(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(values)
 }
 fn run_local(path: &Path, args: &[&str], write: bool) -> Result<Output> {
+    run_local_command(super::git_command(path, args), write)
+}
+fn run_local_command(command: Command, write: bool) -> Result<Output> {
     let out = super::process::run(
-        super::git_command(path, args),
+        command,
         None,
         Duration::from_secs(if write { 120 } else { 15 }),
         8 * 1024 * 1024,
@@ -66,6 +71,64 @@ fn run_local(path: &Path, args: &[&str], write: bool) -> Result<Output> {
         }
     );
     Ok(out)
+}
+
+/// Edit a copy under Git's real config lock, then publish all related keys at
+/// once. Git itself still parses and writes the file, preserving its format.
+fn edit_local_config(path: &Path, edit: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let config = super::common_dir(path)?.join("config");
+    let lock_path = config.with_extension("lock");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock_path)
+        .context("remote_configuration_failed")?;
+    struct Lock(Option<PathBuf>);
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            if let Some(path) = &self.0 {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    let mut lock = Lock(Some(lock_path.clone()));
+    let meta = fs::symlink_metadata(&config)?;
+    ensure!(
+        meta.is_file() && !meta.file_type().is_symlink(),
+        "remote_configuration_failed"
+    );
+    let original = fs::read(&config)?;
+    file.write_all(&original)?;
+    file.set_permissions(meta.permissions())?;
+    file.sync_all()?;
+    drop(file);
+    edit(&lock_path)?;
+    // Respect even an editor which does not honor Git's lock convention.
+    ensure!(fs::read(&config)? == original, "stale_remote_state");
+    fs::File::open(&lock_path)?.sync_all()?;
+    fs::rename(&lock_path, &config)?;
+    lock.0 = None;
+    Ok(())
+}
+fn config_value(path: &Path, file: &Path, key: &str, value: Option<&str>) -> Result<()> {
+    let file = file.to_str().context("unsupported_remote_config")?;
+    let args = if let Some(value) = value {
+        vec!["config", "--file", file, "--replace-all", key, value]
+    } else {
+        vec!["config", "--file", file, "--unset-all", key]
+    };
+    let out = super::process::run(
+        super::git_command(path, &args),
+        None,
+        Duration::from_secs(15),
+        1024,
+    )?;
+    ensure!(
+        out.status.success() || (value.is_none() && out.status.code() == Some(5)),
+        "remote_configuration_failed"
+    );
+    Ok(())
 }
 fn scalar<'a>(cfg: &'a [(String, String)], key: &str) -> Option<&'a str> {
     cfg.iter()
@@ -225,7 +288,7 @@ fn validate_url(url: &str, policy: Policy) -> Result<()> {
             .context("unsupported_remote_transport")?;
         host(authority, true)?;
         ensure!(
-            !path.is_empty() && !path.starts_with('-'),
+            !path.is_empty() && !path.starts_with(['-', ':']),
             "invalid_remote_url"
         );
     }
@@ -561,56 +624,27 @@ pub fn configure(
             run_local(path, &["remote", "remove", name], true)?;
         }
         "add" => {
-            run_local(path, &["remote", "add", name, url.unwrap()], true)?;
-            if let Some(push) = push_url {
-                run_local(path, &["remote", "set-url", "--push", name, push], true)?;
-            }
+            edit_local_config(path, |file| {
+                expected(path, hash, Policy::Network)?;
+                config_value(path, file, &format!("remote.{name}.url"), url)?;
+                config_value(
+                    path,
+                    file,
+                    &format!("remote.{name}.fetch"),
+                    Some(&format!("+refs/heads/*:refs/remotes/{name}/*")),
+                )?;
+                if let Some(push) = push_url {
+                    config_value(path, file, &format!("remote.{name}.pushurl"), Some(push))?;
+                }
+                Ok(())
+            })?;
         }
         _ => {
-            run_local(
-                path,
-                &[
-                    "config",
-                    "--local",
-                    "--replace-all",
-                    &format!("remote.{name}.url"),
-                    url.unwrap(),
-                ],
-                true,
-            )?;
-            if let Some(push) = push_url {
-                run_local(
-                    path,
-                    &[
-                        "config",
-                        "--local",
-                        "--replace-all",
-                        &format!("remote.{name}.pushurl"),
-                        push,
-                    ],
-                    true,
-                )?;
-            } else {
-                let out = super::process::run(
-                    super::git_command(
-                        path,
-                        &[
-                            "config",
-                            "--local",
-                            "--unset-all",
-                            &format!("remote.{name}.pushurl"),
-                        ],
-                    ),
-                    None,
-                    Duration::from_secs(15),
-                    1024,
-                )
-                .map_err(|_| anyhow::anyhow!("remote_outcome_unknown"))?;
-                ensure!(
-                    out.status.success() || out.status.code() == Some(5),
-                    "remote_configuration_failed"
-                );
-            }
+            edit_local_config(path, |file| {
+                expected(path, hash, Policy::Network)?;
+                config_value(path, file, &format!("remote.{name}.url"), url)?;
+                config_value(path, file, &format!("remote.{name}.pushurl"), push_url)
+            })?;
         }
     }
     Ok(())
@@ -765,17 +799,15 @@ fn integrate_fetched(
     ensure!(ancestor.status.success(), "remote_pull_not_fast_forward");
     let local_branch = initial.branch.unwrap();
     let branch_config = format!(
-        "branch.{}.mergeOptions=",
+        "branch.{}.mergeOptions",
         local_branch
             .strip_prefix("refs/heads/")
             .context("remote_branch_required")?
     );
     // The fetched OID is immutable. FF-only integration cannot create commits.
-    run_local(
+    let mut command = super::git_command(
         path,
         &[
-            "-c",
-            &branch_config,
             "-c",
             "merge.verifySignatures=false",
             "-c",
@@ -787,8 +819,24 @@ fn integrate_fetched(
             "--no-verify-signatures",
             target,
         ],
-        true,
-    )?;
+    );
+    // A legal branch name can contain '='. Config environment entries keep the
+    // key separate from its value instead of splitting `-c key=value` early.
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", branch_config)
+        .env("GIT_CONFIG_VALUE_0", "");
+    if let Err(error) = run_local_command(command, true) {
+        ensure!(
+            !super::snapshot(path).is_ok_and(|current| &current == local_snapshot),
+            "remote_pull_blocked"
+        );
+        return Err(error);
+    }
+    ensure!(
+        super::oid(path, "HEAD").is_ok_and(|head| head == target),
+        "remote_outcome_unknown"
+    );
     // Integration is confirmed. Preserve choices made by another Git process
     // while checkout ran; optional tracking failures cannot undo that success.
     Ok(finish_pull(path, cfg, &local_branch, name, branch, target))
@@ -806,7 +854,7 @@ fn finish_pull(
         && super::oid(path, "HEAD").is_ok_and(|current| current == target)
         && config(path).is_ok_and(|current| current == cfg)
     {
-        return set_upstream(path, local_branch, remote, branch).is_ok();
+        return set_upstream(path, cfg, local_branch, remote, branch).is_ok();
     }
     false
 }
@@ -868,35 +916,30 @@ fn finish_push(
     if super::snapshot(path).is_ok_and(|current| &current == initial)
         && config(path).is_ok_and(|current| current == cfg)
     {
-        return set_upstream(path, local_branch, remote, target).is_ok();
+        return set_upstream(path, cfg, local_branch, remote, target).is_ok();
     }
     false
 }
-fn set_upstream(path: &Path, branch: &str, remote: &str, target: &str) -> Result<()> {
+fn set_upstream(
+    path: &Path,
+    cfg: &[(String, String)],
+    branch: &str,
+    remote: &str,
+    target: &str,
+) -> Result<()> {
     let branch = branch
         .strip_prefix("refs/heads/")
         .context("remote_branch_required")?;
-    run_local(
-        path,
-        &[
-            "config",
-            "--local",
-            &format!("branch.{branch}.remote"),
-            remote,
-        ],
-        true,
-    )?;
-    run_local(
-        path,
-        &[
-            "config",
-            "--local",
+    edit_local_config(path, |file| {
+        ensure!(config(path)? == cfg, "stale_remote_state");
+        config_value(path, file, &format!("branch.{branch}.remote"), Some(remote))?;
+        config_value(
+            path,
+            file,
             &format!("branch.{branch}.merge"),
-            &format!("refs/heads/{target}"),
-        ],
-        true,
-    )?;
-    Ok(())
+            Some(&format!("refs/heads/{target}")),
+        )
+    })
 }
 pub fn clone_repository(url: &str, destination: &Path) -> Result<PathBuf> {
     // Leave the native helper time to receive the terminal result before its
@@ -1097,6 +1140,10 @@ mod tests {
             "../server",
             "file:///tmp/a",
             "ext::sh -c id",
+            "ext::sh",
+            "ext::/usr/bin/id",
+            "fd::3",
+            "git@host::project",
             "https://alice:secret@example.test/a",
             "https://token@example.test/a",
             "ssh://git:secret@host/a",
@@ -1114,6 +1161,20 @@ mod tests {
                 display_url(url, Policy::Network),
                 "[unsupported or credential-bearing URL]"
             );
+        }
+    }
+    #[test]
+    fn helper_urls_are_never_stored_or_reported_supported() {
+        let f = Fixture::new();
+        for url in ["ext::sh", "ext::/usr/bin/id", "fd::3", "git@host::project"] {
+            assert!(configure(&f.client, "unused", "add", "unsafe", Some(url), None).is_err());
+            assert_eq!(git(&f.client, &["remote"]), "origin");
+            git(&f.client, &["config", "remote.unsafe.url", url]);
+            let state = state(&f.client).unwrap();
+            let remote = state.remotes.iter().find(|r| r.name == "unsafe").unwrap();
+            assert!(!remote.supported);
+            assert_eq!(remote.fetch_url, "[unsupported or credential-bearing URL]");
+            git(&f.client, &["config", "--remove-section", "remote.unsafe"]);
         }
     }
     #[test]
@@ -1603,6 +1664,89 @@ mod tests {
         assert!(!hook_marker.exists());
     }
     #[test]
+    fn pull_ignores_merge_options_even_when_branch_contains_equals() {
+        let f = Fixture::new();
+        git(&f.client, &["branch", "-m", "a=b"]);
+        git(
+            &f.client,
+            &["config", "branch.a=b.mergeOptions", "--squash"],
+        );
+        f.advance();
+        assert!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "main",
+                Policy::Fixture
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            git(&f.client, &["rev-parse", "HEAD"]),
+            git(&f.source, &["rev-parse", "HEAD"])
+        );
+        assert!(f.state().clean);
+    }
+    #[test]
+    fn related_config_edits_publish_together_and_preserve_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let config_path = f.client.join(".git/config");
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
+        let original = fs::read(&config_path).unwrap();
+        let failed = edit_local_config(&f.client, |file| {
+            config_value(&f.client, file, "branch.main.remote", Some("replacement"))?;
+            config_value(&f.client, file, "invalid", Some("fails after first edit"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), original);
+        assert!(!config_path.with_extension("lock").exists());
+        let cfg = config(&f.client).unwrap();
+        set_upstream(
+            &f.client,
+            &cfg,
+            "refs/heads/main",
+            "replacement",
+            "reviewed",
+        )
+        .unwrap();
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.remote"]),
+            "replacement"
+        );
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.merge"]),
+            "refs/heads/reviewed"
+        );
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+    #[test]
+    fn config_transaction_respects_external_locks_and_uncooperative_edits() {
+        let f = Fixture::new();
+        let config_path = f.client.join(".git/config");
+        let lock = config_path.with_extension("lock");
+        let original = fs::read(&config_path).unwrap();
+        fs::write(&lock, "another Git process").unwrap();
+        assert!(edit_local_config(&f.client, |_| panic!("must not edit without lock")).is_err());
+        assert_eq!(fs::read_to_string(&lock).unwrap(), "another Git process");
+        fs::remove_file(&lock).unwrap();
+        let mut edited = original.clone();
+        edited.extend_from_slice(b"\n# manual edit outside Git\n");
+        let failed = edit_local_config(&f.client, |file| {
+            config_value(&f.client, file, "branch.main.remote", Some("replacement"))?;
+            fs::write(&config_path, &edited)?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(failed.to_string(), "stale_remote_state");
+        assert_eq!(fs::read(&config_path).unwrap(), edited);
+        assert!(!lock.exists());
+    }
+    #[test]
     fn pull_rejects_source_and_endpoint_drift_after_fetch() {
         let f = Fixture::new();
         f.advance();
@@ -1670,7 +1814,7 @@ mod tests {
         git(&f.source, &["add", "--force", "local.env"]);
         git(&f.source, &["commit", "-m", "track incoming environment"]);
         git(&f.source, &["push", f.bare.to_str().unwrap(), "main"]);
-        assert!(
+        assert_eq!(
             pull_policy(
                 &f.client,
                 &f.state().state_hash,
@@ -1678,7 +1822,9 @@ mod tests {
                 "main",
                 Policy::Fixture
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "remote_pull_blocked"
         );
         assert_eq!(
             fs::read_to_string(f.client.join("local.env")).unwrap(),

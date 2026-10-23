@@ -6,8 +6,8 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
     os::fd::AsRawFd,
     os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
+        net::{SocketAddr, UnixListener, UnixStream},
     },
     path::Path,
     sync::Arc,
@@ -19,14 +19,26 @@ const MAX_REQUEST: u64 = 1024 * 1024;
 const MAX_HANDLERS: usize = 32;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn serve(service: Arc<Service>, socket: &Path) -> Result<()> {
+    serve_with_accept(service, socket, UnixListener::accept)
+}
+fn serve_with_accept(
+    service: Arc<Service>,
+    socket: &Path,
+    mut accept: impl FnMut(&UnixListener) -> std::io::Result<(UnixStream, SocketAddr)>,
+) -> Result<()> {
     let parent = socket.parent().context("socket_parent_required")?;
-    fs::create_dir_all(parent)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
     let meta = fs::symlink_metadata(parent)?;
     ensure!(
-        meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == unsafe { libc_uid() },
+        meta.is_dir()
+            && !meta.file_type().is_symlink()
+            && meta.uid() == unsafe { libc_uid() }
+            && meta.permissions().mode() & 0o077 == 0,
         "unsafe_socket_directory"
     );
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -47,15 +59,22 @@ pub fn serve(service: Arc<Service>, socket: &Path) -> Result<()> {
     listener.set_nonblocking(true)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     let mut handlers = Vec::new();
+    let mut listener_error = None;
     while !service.is_stopping() {
         // Reap under sustained accepts too, and bound Git reads and idle peers.
         handlers.retain(|handler: &thread::JoinHandle<()>| !handler.is_finished());
-        match listener.accept() {
+        match accept(&listener) {
             Ok((mut stream, _)) => {
-                stream.set_nonblocking(false)?;
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 if handlers.len() >= MAX_HANDLERS {
-                    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-                    let _ = stream.write_all(b"{\"schema_version\":1,\"error\":{\"code\":\"service_busy\",\"message\":\"Too many concurrent requests; retry shortly.\"}}\n");
+                    if stream
+                        .set_write_timeout(Some(Duration::from_millis(100)))
+                        .is_ok()
+                    {
+                        let _ = stream.write_all(b"{\"schema_version\":1,\"error\":{\"code\":\"service_busy\",\"message\":\"Too many concurrent requests; retry shortly.\"}}\n");
+                    }
                     continue;
                 }
                 let service = service.clone();
@@ -75,7 +94,18 @@ pub fn serve(service: Arc<Service>, socket: &Path) -> Result<()> {
                     libc::poll(&mut descriptor, 1, 250);
                 }
             }
-            Err(error) => return Err(error.into()),
+            Err(error) if transient_accept_error(&error) => {
+                // Resource pressure and disconnected peers affect this accept,
+                // not the listener's lifetime. Bound retries under fd pressure.
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                service
+                    .stopping
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                listener_error = Some(error);
+                break;
+            }
         }
     }
     // The shutdown response is fully written before the process exits. Existing
@@ -83,9 +113,32 @@ pub fn serve(service: Arc<Service>, socket: &Path) -> Result<()> {
     for handler in handlers {
         let _ = handler.join();
     }
-    fs::remove_file(socket)?;
+    // A fatal listener error must not terminate a preparation in the middle of
+    // a Git write or trusted recipe. New admissions already see stopping=true.
+    while !service
+        .active
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let cleanup = fs::remove_file(socket);
     drop(lock);
+    if let Some(error) = listener_error {
+        return Err(error.into());
+    }
+    cleanup?;
     Ok(())
+}
+fn transient_accept_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+    ) || matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::EPROTO)
+    )
 }
 unsafe fn libc_uid() -> u32 {
     unsafe extern "C" {
@@ -172,6 +225,90 @@ pub fn call(socket: &Path, request: &Request) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_service(home: &Path) -> Arc<Service> {
+        let workspace = crate::fixtures::create(home).unwrap();
+        Service::open(workspace, &home.join("journal.sqlite")).unwrap()
+    }
+    #[test]
+    fn existing_socket_parent_permissions_are_never_changed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let service = fixture_service(&temp.path().join("fixture"));
+        let parent = temp.path().join("shared");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o750)).unwrap();
+        let error = serve_with_accept(service, &parent.join("engine.sock"), |_| {
+            Err(std::io::Error::from_raw_os_error(libc::EBADF))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "unsafe_socket_directory");
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+    #[test]
+    fn transient_accept_errors_do_not_end_the_listener() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let service = fixture_service(&temp.path().join("fixture"));
+        let socket = temp.path().join("ipc/service.sock");
+        let running = service.clone();
+        let path = socket.clone();
+        let server = thread::spawn(move || {
+            let mut errors = [
+                libc::ECONNABORTED,
+                libc::EMFILE,
+                libc::ENFILE,
+                libc::ENOMEM,
+                libc::ENOBUFS,
+                libc::EINTR,
+            ]
+            .into_iter();
+            serve_with_accept(running, &path, |listener| match errors.next() {
+                Some(error) => Err(std::io::Error::from_raw_os_error(error)),
+                None => listener.accept(),
+            })
+        });
+        let start = Instant::now();
+        while !socket.exists() {
+            assert!(start.elapsed() < Duration::from_secs(3));
+            thread::sleep(Duration::from_millis(5));
+        }
+        let response = call(
+            &socket,
+            &Request {
+                method: "list_workspaces".into(),
+                params: serde_json::json!({}),
+            },
+        );
+        service.shutdown_if_idle().unwrap();
+        let result = server.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(response.unwrap().error.is_none());
+    }
+    #[test]
+    fn fatal_accept_error_drains_preparation_workers_and_removes_socket() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let service = fixture_service(&temp.path().join("fixture"));
+        service.active.lock().unwrap().insert(
+            "in-flight".into(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let running = service.clone();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            running.active.lock().unwrap().remove("in-flight");
+        });
+        let socket = temp.path().join("ipc/service.sock");
+        let result = serve_with_accept(service.clone(), &socket, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::EBADF))
+        });
+        let drained = service.active.lock().unwrap().is_empty();
+        worker.join().unwrap();
+        assert!(result.is_err());
+        assert!(drained);
+        assert!(service.is_stopping());
+        assert!(!socket.exists());
+    }
     #[test]
     fn a_dribbling_peer_cannot_reset_the_frame_deadline() {
         let (server, mut client) = UnixStream::pair().unwrap();

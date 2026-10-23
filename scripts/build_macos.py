@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Build a native .app bundle using SwiftPM and the bundled Rust engine."""
 import argparse
+import json
 from pathlib import Path
 import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +64,36 @@ def sign_bundle(bundle, identity):
                 raise ValueError("Developer ID signature is missing a secure timestamp")
 
 
+def build_engine(configuration):
+    # Cargo owns artifact layout (target-dir and target-triple may be configured).
+    # Use the executable from this invocation, never an older default target path.
+    argv = ["cargo", "build", "-p", "workbench-cli", "--bin", "workbench",
+            "--message-format=json-render-diagnostics"]
+    if configuration == "release":
+        argv.extend(["--release", "--locked"])
+    result = subprocess.run(argv, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    executables = set()
+    for line in result.stdout.splitlines():
+        message = json.loads(line)
+        if message.get("reason") == "compiler-message":
+            rendered = message.get("message", {}).get("rendered")
+            if rendered:
+                print(rendered, end="", file=sys.stderr)
+        target = message.get("target", {})
+        if (message.get("reason") == "compiler-artifact" and target.get("name") == "workbench"
+                and "bin" in target.get("kind", []) and message.get("executable")):
+            executables.add(Path(message["executable"]))
+    result.check_returncode()
+    if len(executables) != 1:
+        raise ValueError("Cargo did not report exactly one workbench executable")
+    executable = executables.pop()
+    if not executable.is_absolute():
+        executable = ROOT / executable
+    if not executable.is_file():
+        raise ValueError("Cargo reported a missing workbench executable")
+    return executable
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--configuration", choices=["debug", "release"], default="debug")
@@ -77,10 +109,7 @@ def main():
     bundle = args.output.expanduser().absolute()
     if bundle.suffix != ".app" or bundle.is_symlink():
         parser.error("--output must be a .app directory, not a symlink")
-    cargo_args = ["cargo", "build", "-p", "workbench-cli"]
-    if args.configuration == "release":
-        cargo_args.append("--release")
-    subprocess.run(cargo_args, cwd=ROOT, check=True)
+    engine = build_engine(args.configuration)
     package = ROOT / "apps/macos"
     subprocess.run(["swift", "build", "--package-path", str(package), "-c", args.configuration,
                     "--product", APP_EXECUTABLE], cwd=ROOT, check=True)
@@ -89,23 +118,25 @@ def main():
     bundle.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="river-build-", dir=bundle.parent) as temporary:
         staged = Path(temporary) / "River.app"
-        assemble_bundle(staged, binary_dir, package, args.configuration, metadata, args.sign_identity)
+        assemble_bundle(staged, binary_dir, engine, package, args.configuration, metadata, args.sign_identity)
         if bundle.exists():
             shutil.rmtree(bundle)
         staged.rename(bundle)
     print(bundle)
 
 
-def assemble_bundle(bundle, binary_dir, package, configuration, metadata, identity):
+def assemble_bundle(bundle, binary_dir, engine, package, configuration, metadata, identity):
     executable = bundle / "Contents/MacOS"
     resources = bundle / "Contents/Resources"
     helpers = bundle / "Contents/Helpers"
     executable.mkdir(parents=True, exist_ok=True)
     resources.mkdir(parents=True, exist_ok=True)
     helpers.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "target" / configuration / "workbench", helpers / "workbench")
+    shutil.copy2(engine, helpers / "workbench")
     shutil.copy2(binary_dir / APP_EXECUTABLE, executable / APP_EXECUTABLE)
     icon = package / "Resources/AppIcon.icns"
+    if configuration == "release" and not icon.is_file():
+        raise ValueError("release bundle requires Resources/AppIcon.icns")
     if icon.exists():
         shutil.copy2(icon, resources / "AppIcon.icns")
     info = {"CFBundleExecutable": APP_EXECUTABLE, "CFBundleIdentifier": APP_IDENTIFIER,

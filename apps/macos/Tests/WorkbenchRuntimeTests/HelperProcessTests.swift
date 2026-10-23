@@ -64,6 +64,95 @@ import Testing
   #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).contains { $0.hasPrefix("recent-corrupt-") })
 }
 
+@Test func unsafeLegacyRuntimeNameFallsBackToPrivateUserTemporaryDirectory() throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-runtime-choice-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder) }
+  let legacy = folder.appendingPathComponent("legacy")
+  let temporary = folder.appendingPathComponent("private-user-temp")
+  try Data("occupied by an unusable entry".utf8).write(to: legacy)
+  #expect(WorkspaceRuntime.defaultRuntimeDirectory(legacy: legacy, temporary: temporary) == temporary.appendingPathComponent("agw", isDirectory: true))
+  try FileManager.default.removeItem(at: legacy)
+  try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+  #expect(WorkspaceRuntime.defaultRuntimeDirectory(legacy: legacy, temporary: temporary) == legacy)
+  // The platform private-temporary path still fits Darwin's 104-byte sun_path.
+  let socket = FileManager.default.temporaryDirectory.appendingPathComponent("agw/\(UUID().uuidString.lowercased()).sock")
+  #expect(socket.path.utf8.count < 104)
+}
+
+@Test func simultaneousFirstOpenAcrossRuntimesKeepsOneWorkspaceIdentity() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-first-open-\(UUID().uuidString)")
+  let sockets = URL(fileURLWithPath: "/tmp/agw-first-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  let storage = folder.appendingPathComponent("data")
+  let repo = folder.appendingPathComponent("repo")
+  try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: sockets) }
+  let helper = folder.appendingPathComponent("engine-stub")
+  let entered = folder.appendingPathComponent("workspace-entered")
+  let release = folder.appendingPathComponent("release-workspace")
+  let inspections = folder.appendingPathComponent("inspections")
+  let creations = folder.appendingPathComponent("creations")
+  let script = """
+  #!/usr/bin/python3
+  import sys,json,socket,os,pathlib,time
+  base=pathlib.Path('\(folder.path)')
+  if sys.argv[1]=='inspect':
+      with (base/'inspections').open('a') as log:log.write('inspect\\n')
+      print(json.dumps({'id':'repo','path':sys.argv[2]}));sys.exit(0)
+  if sys.argv[1]=='workspace':
+      with (base/'creations').open('a') as log:log.write(sys.argv[-1]+'\\n')
+      (base/'workspace-entered').touch()
+      deadline=time.monotonic()+5
+      while not (base/'release-workspace').exists():
+          if time.monotonic()>deadline:sys.exit(9)
+          time.sleep(.01)
+      pathlib.Path(sys.argv[-1]).write_text(json.dumps({'schema_version':1,'id':'repo','repositories':[{'id':'repo','path':sys.argv[2]}],'groups':[]}))
+      print('{}');sys.exit(0)
+  if sys.argv[1]!='serve':sys.exit(9)
+  server=socket.socket(socket.AF_UNIX)
+  try:server.bind(sys.argv[-1])
+  except OSError:sys.exit(0)
+  server.listen(16)
+  while True:
+      peer,_=server.accept()
+      try:
+          request=json.loads(peer.makefile('rb').readline())
+          stopping=request['method']=='shutdown_if_idle'
+          peer.sendall((json.dumps({'schema_version':1,'result':{'stopping':True} if stopping else []})+'\\n').encode())
+          if stopping:break
+      finally:peer.close()
+  server.close();os.unlink(sys.argv[-1])
+  """
+  try Data(script.utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+  let first = WorkspaceRuntime(storageDirectory: storage, runtimeDirectory: sockets, helperURL: helper)
+  let second = WorkspaceRuntime(storageDirectory: storage, runtimeDirectory: sockets, helperURL: helper)
+  let firstOpen = Task { try await first.openRepository(repo) }
+  for _ in 0..<200 {
+    if FileManager.default.fileExists(atPath: entered.path) { break }
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(FileManager.default.fileExists(atPath: entered.path))
+  let secondOpen = Task { try await second.openRepository(repo) }
+  for _ in 0..<200 {
+    if (try? String(contentsOf: inspections, encoding: .utf8).split(separator: "\n").count) == 2 { break }
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(try String(contentsOf: inspections, encoding: .utf8).split(separator: "\n").count == 2)
+  // Hold the first registration across the second runtime's completed inspect.
+  // The fixed runtime must wait for the registration lock, not allocate a UUID.
+  try await Task.sleep(for: .milliseconds(200))
+  try Data().write(to: release)
+  let (a, b) = try await (firstOpen.value, secondOpen.value)
+  #expect(a.recent.id == b.recent.id)
+  #expect(a.socketPath == b.socketPath)
+  #expect(try String(contentsOf: creations, encoding: .utf8).split(separator: "\n").count == 1)
+  let reopened = try await second.openRepository(repo)
+  #expect(reopened.recent.id == a.recent.id)
+  await first.stopIdleServices()
+  await second.stopIdleServices()
+}
+
 @Test func repositoryRegistrationSurvivesMRUEvictionAndCorruptRecentMenu() async throws {
   let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-registry-\(UUID().uuidString)")
   let sockets = URL(fileURLWithPath: "/tmp/agw-reg-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -197,6 +286,68 @@ import Testing
     Issue.record("Stalled helper completed")
   } catch StartupFailure.startupTimedOut {}
   #expect(ContinuousClock.now - start < .seconds(2))
+}
+
+@Test func inspectFailureUsesStructuredCodeRatherThanPathSubstring() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-inspect-code-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder) }
+  let helper = folder.appendingPathComponent("helper")
+  for code in ["not_a_repository", "git_unavailable"] {
+    let payload = "{\"error\":{\"code\":\"\(code)\",\"message\":\"could not inspect /tmp/not_a_repository/project\"}}"
+    try Data("#!/bin/sh\nprintf '%s' '\(payload)' >&2\nexit 2\n".utf8).write(to: helper)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+    let runtime = WorkspaceRuntime(storageDirectory: folder.appendingPathComponent("data"), helperURL: helper)
+    do { _ = try await runtime.openRepository(folder); Issue.record("Inspect failure was accepted") }
+    catch StartupFailure.notRepository { #expect(code == "not_a_repository") }
+    catch StartupFailure.helper { #expect(code == "git_unavailable") }
+  }
+}
+
+@Test func publishedExampleLookupFailureKeepsItsEngineUntilNormalShutdown() async throws {
+  let folder = FileManager.default.temporaryDirectory.appendingPathComponent("agw-example-lookup-\(UUID().uuidString)")
+  let sockets = URL(fileURLWithPath: "/tmp/agw-example-\(UUID().uuidString.prefix(8))", isDirectory: true)
+  let storage = folder.appendingPathComponent("data"); let repo = folder.appendingPathComponent("example")
+  let id = UUID(); let workspace = storage.appendingPathComponent("workspaces/\(id.uuidString.lowercased())")
+  try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: sockets) }
+  try Data("{}".utf8).write(to: workspace.appendingPathComponent("workspace.json"))
+  let helper = folder.appendingPathComponent("engine-stub")
+  let starts = folder.appendingPathComponent("starts"); let shutdown = folder.appendingPathComponent("shutdown")
+  let script = """
+  #!/usr/bin/python3
+  import sys,json,socket,pathlib,os
+  with pathlib.Path('\(starts.path)').open('a') as log:log.write('serve\\n')
+  server=socket.socket(socket.AF_UNIX);server.bind(sys.argv[-1]);server.listen(16)
+  while True:
+      peer,_=server.accept()
+      try:
+          request=json.loads(peer.makefile('rb').readline())
+          method=request['method']
+          if method=='get_operation_by_key':
+              response={'schema_version':1,'error':{'code':'service_busy','message':'busy'}}
+          elif method=='shutdown_if_idle':
+              pathlib.Path('\(shutdown.path)').touch()
+              response={'schema_version':1,'result':{'stopping':True}}
+          else:response={'schema_version':1,'result':[]}
+          peer.sendall((json.dumps(response)+'\\n').encode())
+          if method=='shutdown_if_idle':break
+      finally:peer.close()
+  server.close();os.unlink(sys.argv[-1])
+  """
+  try Data(script.utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+  let runtime = WorkspaceRuntime(storageDirectory: storage, runtimeDirectory: sockets, helperURL: helper)
+  let recent = RecentWorkspace(id: id, name: "Example", repositoryPath: repo.path, isExample: true, lastOpened: Date())
+  _ = try await runtime.openRecent(recent)
+  do { _ = try await runtime.openExample(); Issue.record("Busy example lookup unexpectedly succeeded") }
+  catch {}
+  #expect(!FileManager.default.fileExists(atPath: shutdown.path))
+  _ = try await runtime.openRecent(recent)
+  #expect(try String(contentsOf: starts, encoding: .utf8) == "serve\n")
+  await runtime.stopIdleServices()
+  #expect(FileManager.default.fileExists(atPath: shutdown.path))
 }
 
 @Test func cloneHelperUsesExactArgumentsAndPreservesCompletedCloneOnRegistrationFailure() async throws {

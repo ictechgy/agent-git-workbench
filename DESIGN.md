@@ -74,6 +74,7 @@
 - Keep placement actions reachable without dragging and critical controls available without hover. Provide visible focus and text/icons alongside color.
 - The folder disclosure and pane actions must be operable by keyboard. Preserve existing shortcuts and Escape dismissal.
 - Dedicated Increase Contrast colors strengthen lines and text. Code remains selectable; diff additions/deletions retain signs and semantics. Token contrast calculations do not replace VoiceOver or keyboard testing.
+- Diff rows expose embedded line controls and bidirectional controls as visible glyphs. The raw patch remains unchanged for hashing and staging. Previous-reading sheets retain the captured read-only snapshot when live selection changes.
 
 ## Responsive behavior
 
@@ -116,4 +117,4 @@
 - [ ] Product owner: choose a license for the project. The authorized public testing alpha retains the disclosed `UNLICENSED` status; distribution does not imply that licensing is resolved.
 - [ ] QA: complete OS-level keyboard/VoiceOver testing and verify long names and dense custom layouts across supported systems.
 - [ ] Performance: measure repository switching, worktree creation against Git CLI, and idle/active memory on large repositories before making performance claims.
-- [ ] Distribution: complete Apple notarization and minimum-supported-macOS runtime validation. Developer ID-signed DMG packaging is available; see [release notes](docs/releases/v0.1.0-alpha.2.md).
+- [ ] Distribution: complete Apple notarization and minimum-supported-macOS runtime validation. Developer ID-signed DMG packaging is available; see [release notes](docs/releases/v0.1.0-alpha.3.md).

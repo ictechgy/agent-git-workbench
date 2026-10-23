@@ -142,10 +142,13 @@ public final class TaskContextStore: ObservableObject {
     let version = scopeToken
     do {
       let result: TaskContextBundle = try await client.call("save_task_context", params: values)
-      guard version == scopeToken, scopeResolved else { return }
-      bundle = result; self.draft = ContextDraft(result.context); loaded = true
+      // A metadata lookup can become unavailable while this confirmed save is
+      // in flight. The scope token still proves which draft owns the reply;
+      // retain its new revision without authorizing another unresolved write.
+      guard version == scopeToken else { return }
+      bundle = result; self.draft = ContextDraft(result.context); loaded = scopeResolved
       drafts.removeValue(forKey: scope)
-      message = "이 기기의 작업 이력에 저장했습니다."
+      if scopeResolved { message = "이 기기의 작업 이력에 저장했습니다." }
     } catch {
       guard version == scopeToken else { return }
       message = UserFacingFailure.message(error)

@@ -103,7 +103,7 @@ pub(super) fn run(
             || start.elapsed() >= timeout
             || overflow.load(Ordering::SeqCst)
         {
-            let timed_out = start.elapsed() >= timeout;
+            let timed_out = info.si_pid != child.id() as i32 && start.elapsed() >= timeout;
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }

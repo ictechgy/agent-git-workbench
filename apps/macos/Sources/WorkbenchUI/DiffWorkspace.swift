@@ -4,7 +4,7 @@ import WorkbenchProtocol
 struct DiffWorkspace: View {
   @ObservedObject var store: WorkbenchStore
   @State private var onlyChangedHunks = false
-  @State private var showPreviousReading = false
+  @State private var previousReading: PresentedReading?
   @State private var request: HunkRequest?
   var body: some View {
     VStack(spacing: 0) {
@@ -141,8 +141,8 @@ struct DiffWorkspace: View {
     }.background(WorkbenchTheme.canvas)
       .onChange(of: store.currentReviewID) { _, _ in onlyChangedHunks = false }
       .sheet(item: $request) { HunkRequestSheet(request: $0) }
-      .sheet(isPresented: $showPreviousReading) {
-        if let checkpoint = store.readingCheckpoint {
+      .sheet(item: $previousReading) { reading in
+        let checkpoint = reading.checkpoint
           VStack(alignment: .leading, spacing: 14) {
             Text("이전 검토 당시의 변경").font(.headline)
             Text(checkpoint.date, format: .dateTime.month().day().hour().minute())
@@ -152,9 +152,8 @@ struct DiffWorkspace: View {
                 .textSelection(.enabled).padding(12)
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             HStack { Text("읽기 전용 · 이 기록으로 staging하지 않습니다.").font(.caption)
-              Spacer(); Button("닫기") { showPreviousReading = false }.keyboardShortcut(.cancelAction) }
+              Spacer(); Button("닫기") { previousReading = nil }.keyboardShortcut(.cancelAction) }
           }.padding(20).frame(width: 700, height: 520)
-        }
       }
   }
 
@@ -175,7 +174,7 @@ struct DiffWorkspace: View {
         Spacer(minLength: 0)
         if let checkpoint = store.readingCheckpoint {
           Menu {
-            Button("이전 검토 보기") { showPreviousReading = true }
+            Button("이전 검토 보기") { previousReading = PresentedReading(checkpoint: checkpoint) }
             if checkpoint.contentIdentity != diff.contentIdentity || onlyChangedHunks {
               Toggle("달라진 변경만 표시", isOn: $onlyChangedHunks)
             }
@@ -202,6 +201,11 @@ struct DiffWorkspace: View {
     }.padding(.horizontal, 14).padding(.vertical, 8).background(WorkbenchTheme.canvas)
     Divider()
   }
+}
+
+private struct PresentedReading: Identifiable {
+  let id = UUID()
+  let checkpoint: ReadingCheckpoint
 }
 
 private struct HunkView: View {
@@ -267,10 +271,10 @@ private struct HunkView: View {
                 Text(row.newNumber.map(String.init) ?? "").frame(width: 38, alignment: .trailing)
                   .padding(.trailing, 14)
                 Text(
-                  (row.kind == .addition ? "+ " : row.kind == .deletion ? "− " : "  ") + visibleLineEnd(row.text)
+                  (row.kind == .addition ? "+ " : row.kind == .deletion ? "- " : "  ") + DiffLines.displayText(row.text)
                 )
                 .foregroundStyle(WorkbenchTheme.primaryText).textSelection(.enabled)
-                  .fixedSize(horizontal: true, vertical: false).frame(
+                  .fixedSize(horizontal: true, vertical: true).frame(
                   maxWidth: .infinity, alignment: .leading)
               }.font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).frame(
                 minWidth: max(560, availableWidth), minHeight: 28, alignment: .leading
@@ -291,7 +295,9 @@ private struct CodeCell: View {
       Text(cell?.number.map(String.init) ?? "").foregroundStyle(WorkbenchTheme.secondaryText).frame(
         width: 30, height: 28, alignment: .trailing)
         .background(lineGutterBackground(cell?.kind ?? .context))
-      Text(visibleLineEnd(cell?.text ?? " ")).textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
+      Text(cell?.kind == .addition ? "+" : cell?.kind == .deletion ? "-" : " ")
+        .frame(width: 8).accessibilityHidden(true)
+      Text(DiffLines.displayText(cell?.text ?? " ")).textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
       if cell?.noNewline == true {
         Text("개행 없음").font(.system(size: 10)).foregroundStyle(.secondary)
       }
@@ -304,9 +310,6 @@ private struct CodeCell: View {
           "\($0.kind == .addition ? "추가" : $0.kind == .deletion ? "삭제" : "") \($0.number.map(String.init) ?? "") \($0.text)"
         } ?? "빈 행")
   }
-}
-private func visibleLineEnd(_ text: String) -> String {
-  text.hasSuffix("\r") ? String(text.dropLast()) + " ␍" : text
 }
 private func lineBackground(_ kind: LineKind) -> Color {
   switch kind {

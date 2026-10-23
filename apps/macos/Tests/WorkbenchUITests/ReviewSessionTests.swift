@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import WorkbenchProtocol
@@ -81,4 +82,49 @@ private func reviewDiff(_ hunks: [String], key: String = "file-1", snapshot: Str
   #expect(text.contains(patch))
   #expect(!text.contains("unselected-hunk"))
   #expect(text.contains("stage/commit"))
+}
+
+@MainActor private final class FlippedReviewDocument: NSView {
+  override var isFlipped: Bool { true }
+}
+
+@Test @MainActor func scrollCheckpointRestoresAfterDocumentLayoutArrives() {
+  let store = WorkbenchStore()
+  let id = ReviewFileID(location: .init(repoId: "a"), path: "file.swift", staged: false, stashOID: nil)
+  store.rememberReviewOffset(420, content: "exact diff", at: id)
+  let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+  let document = FlippedReviewDocument(frame: NSRect(x: 0, y: 0, width: 600, height: 0))
+  scroll.documentView = document
+  let coordinator = ReviewScrollPosition.Coordinator()
+  coordinator.configure(store: store, id: id, content: "exact diff", enabled: true)
+  coordinator.attach(to: scroll)
+  #expect(scroll.contentView.bounds.minY == 0)
+  document.setFrameSize(NSSize(width: 600, height: scroll.contentView.bounds.height + 80))
+  NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
+  #expect(scroll.contentView.bounds.minY == 80)
+  document.setFrameSize(NSSize(width: 600, height: 2_000))
+  NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
+  #expect(scroll.contentView.bounds.minY == 420)
+  #expect(store.reviewOffset(content: "exact diff", at: id) == 420)
+  coordinator.detach()
+}
+
+@Test @MainActor func queuedScrollAttachmentCannotRestoreAfterDismantle() async {
+  let store = WorkbenchStore()
+  let id = ReviewFileID(location: .init(repoId: "a"), path: "file.swift", staged: false, stashOID: nil)
+  store.rememberReviewOffset(420, content: "exact diff", at: id)
+  let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+  let document = FlippedReviewDocument(frame: NSRect(x: 0, y: 0, width: 600, height: 2_000))
+  let anchor = NSView(); document.addSubview(anchor); scroll.documentView = document
+  let coordinator = ReviewScrollPosition.Coordinator()
+  coordinator.configure(store: store, id: id, content: "exact diff", enabled: true)
+  coordinator.scheduleAttach(to: anchor)
+  coordinator.detach()
+  await withCheckedContinuation { continuation in
+    DispatchQueue.main.async { continuation.resume() }
+  }
+  #expect(scroll.contentView.bounds.minY == 0)
+  document.setFrameSize(NSSize(width: 600, height: 2_500))
+  NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
+  #expect(scroll.contentView.bounds.minY == 0)
 }

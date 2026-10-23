@@ -46,6 +46,7 @@ enum HelperProcess {
       if let payload = try? JSONSerialization.jsonObject(with: err.data) as? [String: Any],
         let failure = payload["error"] as? [String: Any], let code = failure["code"] as? String
       {
+        if arguments.first == "inspect", code == "not_a_repository" { throw StartupFailure.notRepository }
         if code == "unsupported_external_filter" { throw StartupFailure.externalFilters }
         if code == "unsafe_source_repository" { throw StartupFailure.unsafeRepository }
         if arguments.first == "clone" { throw StartupFailure.remote(code) }

@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import WorkbenchProtocol
 
@@ -71,8 +72,22 @@ public actor WorkspaceRuntime {
       ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("AgentGitWorkbench", isDirectory: true)
     // Darwin sun_path is 104 bytes. Never derive it from a potentially long user/project path.
-    runtime = runtimeDirectory ?? URL(fileURLWithPath: "/tmp/agw-\(getuid())", isDirectory: true)
+    runtime = runtimeDirectory ?? Self.defaultRuntimeDirectory()
     explicitHelper = helperURL
+  }
+
+  nonisolated static func defaultRuntimeDirectory(
+    legacy: URL = URL(fileURLWithPath: "/tmp/agw-\(getuid())", isDirectory: true),
+    temporary: URL = FileManager.default.temporaryDirectory
+  ) -> URL {
+    // Reuse a safe legacy directory for existing engines. Otherwise use macOS's
+    // private per-user temporary tree, where another uid cannot reserve our name.
+    var info = stat()
+    if lstat(legacy.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+      info.st_uid == getuid(), (info.st_mode & 0o077) == 0 {
+      return legacy
+    }
+    return temporary.appendingPathComponent("agw", isDirectory: true)
   }
 
   public func recentWorkspaces() throws -> [RecentWorkspace] {
@@ -90,13 +105,8 @@ public actor WorkspaceRuntime {
     guard FileManager.default.fileExists(atPath: selected.path) else {
       throw StartupFailure.repositoryMissing
     }
-    let info: RepositoryInfo
-    do {
-      let data = try await runHelper(["inspect", selected.path])
-      info = try JSONDecoder().decode(RepositoryInfo.self, from: data)
-    } catch StartupFailure.helper(let details) where details.contains("not_a_repository") {
-      throw StartupFailure.notRepository
-    }
+    let data = try await runHelper(["inspect", selected.path])
+    let info = try JSONDecoder().decode(RepositoryInfo.self, from: data)
     return try await coalesce("repository:\(info.path)") {
       try await self.openInspectedRepository(info)
     }
@@ -117,23 +127,49 @@ public actor WorkspaceRuntime {
     catch { throw StartupFailure.cloneCreated(result.path) }
   }
   private func openInspectedRepository(_ info: RepositoryInfo) async throws -> WorkspaceSession {
+    let recent = try await registerRepository(info)
+    return try await openRecent(recent)
+  }
+
+  private func registerRepository(_ info: RepositoryInfo) async throws -> RecentWorkspace {
+    // UUID-keyed engine leases cannot arbitrate competing first registrations.
+    // Publish the repository identity under a cross-process lock before startup.
+    let lock = try await registrationLock(for: info.path)
+    defer { lock.release() }
     if let existing = try recentWorkspaces().first(where: {
       !$0.isExample && $0.repositoryPath == info.path
     }),
       FileManager.default.fileExists(atPath: config(existing.id).path)
     {
-      return try await openRecent(existing)
+      return existing
     }
     // MRU is a bounded menu, not the durable repository-to-journal registry.
     if let existing = try registeredWorkspace(for: info) {
-      return try await openRecent(existing)
+      return existing
     }
     let recent = RecentWorkspace(
       id: UUID(), name: info.id, repositoryPath: info.path,
       isExample: false, lastOpened: Date())
     try prepareDirectories(recent.id)
     _ = try await runHelper(["workspace", info.path, config(recent.id).path])
-    return try await activate(recent)
+    try saveRecord(recent)
+    return recent
+  }
+
+  private func registrationLock(for repositoryPath: String) async throws -> WorkspaceLease {
+    let locks = storage.appendingPathComponent("registration-locks", isDirectory: true)
+    try preparePrivateDirectories([storage, locks])
+    let key = SHA256.hash(data: Data(repositoryPath.utf8)).map { String(format: "%02x", $0) }.joined()
+    let file = locks.appendingPathComponent(key + ".lock")
+    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+    while true {
+      try Task.checkCancellation()
+      do { return try WorkspaceLease(url: file, exclusive: true) }
+      catch StartupFailure.workspaceBusy {
+        guard ContinuousClock.now < deadline else { throw StartupFailure.workspaceBusy }
+        try await Task.sleep(for: .milliseconds(50))
+      }
+    }
   }
 
   private func registeredWorkspace(for info: RepositoryInfo) throws -> RecentWorkspace? {
@@ -274,9 +310,8 @@ public actor WorkspaceRuntime {
       }
       throw StartupFailure.startupTimedOut
     } catch {
-      // Failed, unpublished examples must not accumulate idle engines on every retry.
-      // Preserve a preparation still in progress and its journal for recovery.
-      await stopIdleService(id)
+      // Both reused and newly created examples were already published. A failed
+      // lookup is not permission to shut down the engine of an open workspace.
       throw error
     }
   }
@@ -423,7 +458,10 @@ public actor WorkspaceRuntime {
   }
   private func config(_ id: UUID) -> URL { directory(id).appendingPathComponent("workspace.json") }
   private func prepareDirectories(_ id: UUID) throws {
-    for path in [storage, storage.appendingPathComponent("workspaces"), directory(id), runtime] {
+    try preparePrivateDirectories([storage, storage.appendingPathComponent("workspaces"), directory(id), runtime])
+  }
+  private func preparePrivateDirectories(_ paths: [URL]) throws {
+    for path in paths {
       try FileManager.default.createDirectory(
         at: path, withIntermediateDirectories: true,
         attributes: [.posixPermissions: 0o700])
@@ -433,11 +471,14 @@ public actor WorkspaceRuntime {
       else { throw StartupFailure.privateDirectory }
     }
   }
+  private func saveRecord(_ recent: RecentWorkspace) throws {
+    try JSONEncoder().encode(recent).write(
+      to: directory(recent.id).appendingPathComponent("workspace-record.json"), options: .atomic)
+  }
   private func remember(_ recent: RecentWorkspace) throws {
     var recent = recent
     recent.lastOpened = Date()
-    try JSONEncoder().encode(recent).write(
-      to: directory(recent.id).appendingPathComponent("workspace-record.json"), options: .atomic)
+    try saveRecord(recent)
     var history = try recentWorkspaces().filter {
       $0.id != recent.id && !(recent.isExample && $0.isExample)
     }
@@ -534,6 +575,13 @@ private final class WorkspaceLease: @unchecked Sendable {
   init(url: URL, exclusive: Bool) throws {
     descriptor = Darwin.open(url.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
     guard descriptor >= 0 else { throw StartupFailure.privateDirectory }
+    var info = stat()
+    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+      info.st_uid == getuid(), info.st_nlink == 1 else {
+      Darwin.close(descriptor)
+      descriptor = -1
+      throw StartupFailure.privateDirectory
+    }
     if flock(descriptor, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 {
       Darwin.close(descriptor)
       descriptor = -1

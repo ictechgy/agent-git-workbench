@@ -98,6 +98,9 @@ struct CommitHistory: View {
               }.frame(width: max(580, geometry.size.width))
             }
           }
+          Text("최근 \(store.repository?.graph.count ?? 0)개 커밋 · 최대 80개")
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 6)
         } else {
           let events = store.events.filter { $0.operationId == store.contextOperation?.id }
           if events.isEmpty {

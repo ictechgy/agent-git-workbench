@@ -38,6 +38,8 @@ fn git_command(path: &Path, args: &[&str]) -> Command {
             "-c",
             "color.diff=false",
             "-c",
+            "diff.suppressBlankEmpty=false",
+            "-c",
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",

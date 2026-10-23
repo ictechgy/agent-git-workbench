@@ -2,6 +2,7 @@
 """Focused tests for release identity, architecture, and fail-closed notarization."""
 import json
 import hashlib
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -111,6 +112,7 @@ class PackagingTests(unittest.TestCase):
             existing.write_bytes(b"existing release")
             with package_macos.output_lock(output):
                 result = subprocess.run([sys.executable, str(Path(package_macos.__file__).resolve()),
+                                         "--version", "0.1.0-alpha.1", "--build-number", "2",
                                          "--app", "/nonexistent/River.app", "--output-dir", str(output)],
                                         capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
@@ -120,6 +122,87 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue((output / ".river-package.lock").is_file())
             with package_macos.output_lock(output):
                 self.assertEqual(existing.read_bytes(), b"existing release")
+
+    def test_packaging_requires_an_explicit_release_identity(self):
+        for identity in [[], ["--version", "0.1.0-alpha.3"], ["--build-number", "4"]]:
+            with self.subTest(identity=identity):
+                result = subprocess.run([sys.executable, str(Path(package_macos.__file__).resolve()),
+                                         *identity, "--app", "/nonexistent/River.app"],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--version and --build-number are required", result.stderr)
+        with patch.object(sys, "argv", ["package_macos.py", "--verify-dmg", "existing.dmg"]), \
+                patch.object(package_macos, "verify_dmg", return_value={}) as verify, \
+                patch("builtins.print"):
+            package_macos.main()
+        verify.assert_called_once()
+
+    def test_cargo_reported_executable_is_bundled_with_target_directory_overrides(self):
+        # Exercise Cargo itself: its executable moves with both env and config,
+        # while an obsolete binary remains at the previously hard-coded path.
+        for override in ["environment", "config", "target"]:
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "src").mkdir()
+                (root / "src/main.rs").write_text('fn main() { println!("current engine"); }\n')
+                (root / "Cargo.toml").write_text(
+                    '[package]\nname="workbench-cli"\nversion="0.1.0"\nedition="2024"\n'
+                    '[[bin]]\nname="workbench"\npath="src/main.rs"\n')
+                stale = root / "target/debug/workbench"
+                stale.parent.mkdir(parents=True)
+                stale.write_bytes(b"obsolete engine must not be packaged")
+                environment = {key: value for key, value in os.environ.items()
+                               if not key.startswith("CARGO_")}
+                if override == "environment":
+                    environment["CARGO_TARGET_DIR"] = str(root / "other-target")
+                elif override == "config":
+                    (root / ".cargo").mkdir()
+                    (root / ".cargo/config.toml").write_text('[build]\ntarget-dir="other-target"\n')
+                else:
+                    host = subprocess.check_output(["rustc", "-vV"], text=True)
+                    environment["CARGO_BUILD_TARGET"] = next(
+                        line.split(": ", 1)[1] for line in host.splitlines() if line.startswith("host: "))
+                swift = root / "swift"
+                swift.mkdir()
+                (swift / build_macos.APP_EXECUTABLE).write_bytes(b"swift app")
+                package = root / "package"
+                (package / "Resources").mkdir(parents=True)
+                (package / "Resources/AppIcon.icns").write_bytes(b"icon")
+                with patch.object(build_macos, "ROOT", root), patch.dict(os.environ, environment, clear=True):
+                    engine = build_macos.build_engine("debug")
+                    bundle = root / "River.app"
+                    with patch.object(build_macos, "sign_bundle"):
+                        build_macos.assemble_bundle(bundle, swift, engine, package, "debug", {}, "-")
+                bundled = bundle / "Contents/Helpers/workbench"
+                self.assertNotEqual(engine, stale)
+                self.assertEqual(bundled.read_bytes(), engine.read_bytes())
+                self.assertEqual(subprocess.check_output([bundled], text=True), "current engine\n")
+
+    def test_provenance_ignores_foreign_git_environment_and_rejects_untracked_cargo_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "actual"
+            foreign = Path(temporary) / "foreign"
+            for repository in [root, foreign]:
+                repository.mkdir()
+                subprocess.run(["git", "init", "-q", repository], check=True)
+                (repository / "source").write_text("original\n")
+                subprocess.run(["git", "-C", repository, "add", "."], check=True)
+                subprocess.run(["git", "-C", repository, "-c", "user.name=Packaging Test",
+                                "-c", "user.email=packaging@example.invalid", "-c", "commit.gpgsign=false",
+                                "-c", "core.hooksPath=/dev/null", "commit", "-qm", repository.name], check=True)
+            initial = package_macos.clean_source_snapshot(root)
+            with patch.dict(os.environ, {"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign),
+                                         "GIT_INDEX_FILE": str(foreign / ".git/index")}):
+                self.assertEqual(package_macos.clean_source_snapshot(root), initial)
+                (root / "source").write_text("dirty actual source\n")
+                with self.assertRaisesRegex(ValueError, "clean tracked source"):
+                    package_macos.clean_source_snapshot(root)
+            (root / "source").write_text("original\n")
+            (root / ".git/info/exclude").write_text(".cargo/\n")
+            (root / ".cargo").mkdir()
+            (root / ".cargo/config.toml").write_text('[build]\nrustflags=["--cfg", "untracked"]\n')
+            with self.assertRaisesRegex(ValueError, "untracked build inputs"):
+                package_macos.clean_source_snapshot(root)
 
     def test_existing_artifact_set_cannot_be_overwritten(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -160,7 +243,7 @@ class PackagingTests(unittest.TestCase):
             ignored_source = root / "apps/macos/Sources/Ignored.swift"
             ignored_source.parent.mkdir(parents=True)
             ignored_source.write_text("// ignored but buildable\n")
-            with self.assertRaisesRegex(ValueError, "tracked runtime files"):
+            with self.assertRaisesRegex(ValueError, "untracked build inputs"):
                 package_macos.clean_source_snapshot(root)
             ignored_source.unlink()
             source.write_text("fn main() { println!(\"changed\"); }\n")
@@ -198,6 +281,8 @@ class PackagingTests(unittest.TestCase):
                     package_macos.package(self.package_args(output, app=None))
             self.assertEqual([path.name for path in output.iterdir()], [".river-package.lock"])
         for required in ["/usr/bin/git --version", "xcode-select --install", "python3",
+                         "Remote operations require Apple Git 2.41 or later",
+                         "원격 작업에는 Apple Git 2.41 이상이 필요합니다",
                          "Full Xcode is not required", "전체 Xcode는 필요하지 않습니다",
                          "System Settings > Privacy & Security > Open Anyway",
                          "시스템 설정 > 개인정보 보호 및 보안 > 확인 없이 열기",

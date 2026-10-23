@@ -86,7 +86,7 @@ struct DockWorkspace: View {
             drag.bounds = CGRect(origin: .zero, size: size)
           }
       }.background(WorkbenchTheme.chrome)
-        .onExitCommand { drag.cancel() }
+        .onExitCommand(perform: drag.pane == nil ? nil : { drag.cancel() })
         .onReceive(
           NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
         ) { _ in drag.cancel() }
@@ -269,6 +269,21 @@ private struct DockDragOverlay: View {
   }
 }
 
+struct DockSplitGeometry {
+  let available: Double
+  let firstMinimum: Double
+  let secondMinimum: Double
+  func clampedRatio(_ ratio: Double) -> Double {
+    let space = max(1, available)
+    let lower = min(space, max(0, firstMinimum))
+    let upper = max(lower, space - max(0, secondMinimum))
+    return min(upper, max(lower, space * (ratio.isFinite ? ratio : 0.5))) / space
+  }
+  func resizedRatio(from ratio: Double, by distance: Double) -> Double {
+    clampedRatio(clampedRatio(ratio) + distance / max(1, available))
+  }
+}
+
 private struct DockSplit<First: View, Second: View>: View {
   let id: String
   let axis: DockAxis
@@ -287,23 +302,24 @@ private struct DockSplit<First: View, Second: View>: View {
       let available = max(1, (axis == .horizontal ? geometry.size.width : geometry.size.height) - 6)
       let minimumA = axis == .horizontal ? firstMinimum.width : firstMinimum.height
       let minimumB = axis == .horizontal ? secondMinimum.width : secondMinimum.height
-      let length = min(available - minimumB, max(minimumA, available * (proposedRatio ?? ratio)))
+      let sizing = DockSplitGeometry(available: available, firstMinimum: minimumA, secondMinimum: minimumB)
+      let length = available * sizing.clampedRatio(proposedRatio ?? ratio)
       if axis == .horizontal {
         HStack(spacing: 0) {
           first().frame(width: max(0, length))
-          divider(available: available).frame(width: 6)
+          divider(sizing: sizing).frame(width: 6)
           second().frame(maxWidth: .infinity)
         }
       } else {
         VStack(spacing: 0) {
           first().frame(height: max(0, length))
-          divider(available: available).frame(height: 6)
+          divider(sizing: sizing).frame(height: 6)
           second().frame(maxHeight: .infinity)
         }
       }
     }
   }
-  private func divider(available: Double) -> some View {
+  private func divider(sizing: DockSplitGeometry) -> some View {
     Rectangle().fill(WorkbenchTheme.chrome)
       .overlay {
         Rectangle().fill(hovering || resizing ? WorkbenchTheme.accent : WorkbenchTheme.line)
@@ -312,15 +328,15 @@ private struct DockSplit<First: View, Second: View>: View {
           .allowsHitTesting(false)
       }.contentShape(Rectangle())
       .gesture(
-        DragGesture(minimumDistance: 1)
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
           .updating($resizing) { _, state, _ in state = true }
           .onChanged { value in
-            if dragStart == nil { dragStart = ratio }
+            if dragStart == nil { dragStart = sizing.clampedRatio(ratio) }
             let distance = axis == .horizontal ? value.translation.width : value.translation.height
-            proposedRatio = min(0.9, max(0.1, (dragStart ?? ratio) + distance / available))
+            proposedRatio = sizing.resizedRatio(from: dragStart ?? ratio, by: distance)
           }.onEnded { value in
             let distance = axis == .horizontal ? value.translation.width : value.translation.height
-            layout.resizeDock(id, ratio: (dragStart ?? ratio) + distance / available)
+            layout.resizeDock(id, ratio: sizing.resizedRatio(from: dragStart ?? ratio, by: distance))
             proposedRatio = nil
             dragStart = nil
           }
@@ -339,11 +355,12 @@ private struct DockSplit<First: View, Second: View>: View {
         } else {
           NSCursor.pop()
         }
-      }.onDisappear { if hovering { NSCursor.pop() } }
+      }.onDisappear { if hovering { NSCursor.pop(); hovering = false } }
       .accessibilityElement().accessibilityLabel("pane 영역 크기 조절")
       .accessibilityValue("\(Int(ratio * 100)) 퍼센트")
       .accessibilityAdjustableAction { direction in
-        layout.resizeDock(id, ratio: ratio + (direction == .increment ? 0.05 : -0.05))
+        layout.resizeDock(id, ratio: sizing.resizedRatio(from: ratio,
+          by: sizing.available * (direction == .increment ? 0.05 : -0.05)))
       }
   }
 }
