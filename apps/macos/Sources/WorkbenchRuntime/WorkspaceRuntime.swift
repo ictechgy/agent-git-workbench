@@ -32,6 +32,8 @@ public enum StartupFailure: Error, LocalizedError, Sendable {
     case .cloneOutcomeUnknown(let path): "복제의 완료 여부를 확인하지 못했습니다. 다시 복제하기 전에 다음 폴더와 상위 폴더의 상태를 확인해 주세요: \(path)"
     case .remote(let code):
       switch code {
+      case "unsupported_git_version": "원격 기능에는 Apple Git 2.41 이상이 필요합니다. Xcode 또는 Command Line Tools를 업데이트해 주세요."
+      case "unsupported_alternate_command": "외부 Git 명령 설정이 있어 원격 연결을 중단했습니다. Git 설정의 core.alternateRefsCommand를 확인해 주세요."
       case "clone_destination_exists": "같은 이름의 폴더가 이미 있습니다. 다른 이름을 입력해 주세요."
       case "invalid_clone_destination": "복제할 상위 폴더와 새 폴더 이름을 확인해 주세요."
       case "invalid_remote_url", "unsupported_remote_transport": "SSH 또는 HTTPS 저장소 URL을 입력해 주세요. URL에 비밀번호나 토큰을 넣지 마세요."

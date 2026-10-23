@@ -37,13 +37,37 @@ mod tests {
                     // Simulate the repository becoming unavailable after a
                     // successful write, before presentation data can be refreshed.
                     fs::rename(path.join(".git"), path.join("saved-git-metadata"))?;
-                    Ok(())
+                    Ok(None)
                 },
             )
             .unwrap();
         assert_eq!(result["refresh_required"], true);
         assert_eq!(result["state"], Value::Null);
         assert_eq!(result["message"], "Mutation completed.");
+    }
+
+    #[test]
+    fn confirmed_push_with_skipped_tracking_stays_successful_and_explains_the_follow_up() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("workspace");
+        let workspace = fixtures::create(&home).unwrap();
+        let path = workspace.repo("ios-app").unwrap().path.clone();
+        let service = Service::open(workspace, &home.join("journal.sqlite")).unwrap();
+        let state = git::remotes::state(&path).unwrap();
+        let result = service
+            .remote_mutation(
+                "ios-app",
+                None,
+                &state.state_hash,
+                "Push completed.",
+                |_| Ok(push_tracking_notice(false)),
+            )
+            .unwrap();
+        assert_eq!(result["refresh_required"], false);
+        assert!(result["state"].is_object());
+        assert_eq!(result["message"], push_tracking_notice(false).unwrap());
+        assert_eq!(git::remotes::state(&path).unwrap().head, state.head);
+        assert_eq!(push_tracking_notice(true), None);
     }
 }
 impl ConfigureAction {
@@ -151,7 +175,7 @@ impl Service {
                     &p.repo_id,
                     p.op_id.as_deref(),
                     &p.expected_state_hash,
-                    "Remote configuration saved.",
+                    "원격 연결 설정을 저장했습니다.",
                     |path| {
                         git::remotes::configure(
                             path,
@@ -161,6 +185,7 @@ impl Service {
                             p.url.as_deref(),
                             p.push_url.as_deref(),
                         )
+                        .map(|()| None)
                     },
                 )
             }
@@ -173,8 +198,10 @@ impl Service {
                     &p.repo_id,
                     p.op_id.as_deref(),
                     &p.expected_state_hash,
-                    "Remote branches fetched.",
-                    |path| git::remotes::fetch(path, &p.expected_state_hash, &p.remote),
+                    "원격 브랜치 정보를 받았습니다.",
+                    |path| {
+                        git::remotes::fetch(path, &p.expected_state_hash, &p.remote).map(|()| None)
+                    },
                 )
             }
             "pull_remote" | "push_remote" => {
@@ -184,9 +211,9 @@ impl Service {
                 bounded(&p.remote, 200)?;
                 bounded(&p.branch, 1024)?;
                 let message = if method == "pull_remote" {
-                    "Branch updated with a fast-forward pull."
+                    "현재 브랜치를 빨리 감기로 업데이트했습니다."
                 } else {
-                    "Branch pushed."
+                    "브랜치를 원격 저장소로 보냈습니다."
                 };
                 self.remote_mutation(
                     &p.repo_id,
@@ -196,8 +223,10 @@ impl Service {
                     |path| {
                         if method == "pull_remote" {
                             git::remotes::pull(path, &p.expected_state_hash, &p.remote, &p.branch)
+                                .map(|()| None)
                         } else {
                             git::remotes::push(path, &p.expected_state_hash, &p.remote, &p.branch)
+                                .map(push_tracking_notice)
                         }
                     },
                 )
@@ -212,7 +241,7 @@ impl Service {
         op_id: Option<&str>,
         expected_state: &str,
         message: &str,
-        mutate: impl FnOnce(&Path) -> Result<()>,
+        mutate: impl FnOnce(&Path) -> Result<Option<&'static str>>,
     ) -> Result<Value> {
         let _guard = self
             .mutations
@@ -235,7 +264,7 @@ impl Service {
             git::remotes::state(&path)?.state_hash == expected_state,
             "stale_remote_state"
         );
-        mutate(&path)?;
+        let completion_message = mutate(&path)?;
         // A completed remote write must remain successful when its optional
         // presentation refresh fails. The caller can reload without replaying.
         let state = git::fresh_deadline(std::time::Duration::from_secs(15), || {
@@ -245,7 +274,13 @@ impl Service {
         Ok(serde_json::to_value(RemoteMutationResult {
             refresh_required: state.is_none(),
             state,
-            message: message.into(),
+            message: completion_message.unwrap_or(message).into(),
         })?)
     }
+}
+
+fn push_tracking_notice(tracking_updated: bool) -> Option<&'static str> {
+    (!tracking_updated).then_some(
+        "Push는 완료했습니다. 추적 설정을 자동으로 갱신하지 못했으므로 설정을 확인해 주세요.",
+    )
 }

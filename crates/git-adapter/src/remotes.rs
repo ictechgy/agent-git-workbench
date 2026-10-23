@@ -82,6 +82,10 @@ fn values<'a>(cfg: &'a [(String, String)], key: &str) -> Vec<&'a str> {
 fn transport_config(cfg: &[(String, String)]) -> Result<()> {
     for (key, value) in cfg {
         ensure!(
+            key != "core.alternaterefscommand",
+            "unsupported_alternate_command"
+        );
+        ensure!(
             !(key.starts_with("url.")
                 && (key.ends_with(".insteadof") || key.ends_with(".pushinsteadof"))),
             "unsupported_url_rewrite"
@@ -275,7 +279,7 @@ fn network_command(path: &Path, args: &[&str], policy: Policy) -> Command {
         .env("SSH_ASKPASS", "/usr/bin/false")
         .env("SSH_ASKPASS_REQUIRE", "never")
         .env("GIT_SSH_COMMAND", "/usr/bin/ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2")
-        .args(["-c", "credential.helper=", "-c", "credential.interactive=false", "-c", "core.askPass=/usr/bin/false", "-c", "http.sslVerify=true", "-c", "http.followRedirects=false", "-c", "http.postBuffer=1048576", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", "-c", "push.pushOption=", "-c", "push.followTags=false", "-c", "push.gpgSign=false"]);
+        .args(["-c", "core.alternateRefsCommand=/usr/bin/false", "-c", "credential.helper=", "-c", "credential.interactive=false", "-c", "core.askPass=/usr/bin/false", "-c", "http.sslVerify=true", "-c", "http.followRedirects=false", "-c", "http.postBuffer=1048576", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", "-c", "push.pushOption=", "-c", "push.followTags=false", "-c", "push.gpgSign=false"]);
     if let Some(helper) = credential_helper() {
         command.args(["-c", &format!("credential.helper={helper}")]);
     }
@@ -283,6 +287,7 @@ fn network_command(path: &Path, args: &[&str], policy: Policy) -> Command {
     command
 }
 fn network(path: &Path, args: &[&str], policy: Policy, push: bool) -> Result<Vec<u8>> {
+    require_git_version(path)?;
     let out = super::process::run(
         network_command(path, args, policy),
         None,
@@ -307,6 +312,42 @@ fn network(path: &Path, args: &[&str], policy: Policy, push: bool) -> Result<Vec
         bail!("remote_connection_failed");
     }
     Ok(out.stdout)
+}
+fn supported_git_version(text: &str) -> bool {
+    let Some(version) = text
+        .strip_prefix("git version ")
+        .and_then(|v| v.split_whitespace().next())
+    else {
+        return false;
+    };
+    let fields: Vec<_> = version.split('.').collect();
+    if fields.len() != 3 {
+        return false;
+    }
+    let parsed: Option<Vec<u32>> = fields
+        .into_iter()
+        .map(|field| {
+            if !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()) {
+                field.parse().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    parsed.is_some_and(|parts| parts[0] > 2 || (parts[0] == 2 && parts[1] >= 41))
+}
+fn require_git_version(path: &Path) -> Result<()> {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let supported = if let Some(supported) = SUPPORTED.get() {
+        *supported
+    } else {
+        let output = run_local(path, &["--version"], false)?;
+        let value = std::str::from_utf8(&output.stdout).is_ok_and(supported_git_version);
+        let _ = SUPPORTED.set(value);
+        value
+    };
+    ensure!(supported, "unsupported_git_version");
+    Ok(())
 }
 fn remote_refs(path: &Path) -> Result<Vec<(String, String)>> {
     let output = run_local(
@@ -582,17 +623,26 @@ fn fetch_policy(path: &Path, hash: &str, name: &str, policy: Policy) -> Result<(
     let cfg = config(path)?;
     let (url, _) = reviewed_endpoints(&initial, &cfg, name, policy)?;
     expected(path, hash, policy)?;
-    fetch_url(path, &url, name, policy)
+    fetch_url(path, &url, name, policy).map(|_| ())
 }
-fn fetch_url(path: &Path, url: &str, name: &str, policy: Policy) -> Result<()> {
+fn fetch_url(
+    path: &Path,
+    url: &str,
+    name: &str,
+    policy: Policy,
+) -> Result<BTreeMap<String, Option<String>>> {
     let mapping = format!("+refs/heads/*:refs/remotes/{name}/*");
-    network(
+    let output = network(
         path,
         &[
             "fetch",
+            "--porcelain",
+            "--verbose",
             "--atomic",
             "--prune",
+            "--no-prune-tags",
             "--no-tags",
+            "--show-forced-updates",
             "--no-recurse-submodules",
             "--no-auto-maintenance",
             "--refmap=",
@@ -603,7 +653,53 @@ fn fetch_url(path: &Path, url: &str, name: &str, policy: Policy) -> Result<()> {
         policy,
         false,
     )?;
-    Ok(())
+    parse_fetch(&output, name)
+}
+fn parse_fetch(output: &[u8], name: &str) -> Result<BTreeMap<String, Option<String>>> {
+    let text = std::str::from_utf8(output).context("invalid_remote_fetch_result")?;
+    let mut updates = BTreeMap::new();
+    let prefix = format!("refs/remotes/{name}/");
+    for line in text.lines() {
+        let bytes = line.as_bytes();
+        ensure!(
+            bytes.len() > 2 && bytes[1] == b' ',
+            "invalid_remote_fetch_result"
+        );
+        let flag = bytes[0];
+        ensure!(
+            matches!(flag, b' ' | b'+' | b'*' | b'=' | b'-'),
+            "invalid_remote_fetch_result"
+        );
+        let fields: Vec<_> = line[2..].split_whitespace().collect();
+        ensure!(
+            fields.len() == 3 && fields[2].starts_with(&prefix) && fields[2].len() > prefix.len(),
+            "invalid_remote_fetch_result"
+        );
+        let valid_oid =
+            |oid: &str| matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit());
+        ensure!(
+            valid_oid(fields[0]) && valid_oid(fields[1]) && fields[0].len() == fields[1].len(),
+            "invalid_remote_fetch_result"
+        );
+        let new_oid = if flag == b'-' {
+            ensure!(
+                fields[1].bytes().all(|b| b == b'0'),
+                "invalid_remote_fetch_result"
+            );
+            None
+        } else {
+            ensure!(
+                !fields[1].bytes().all(|b| b == b'0'),
+                "invalid_remote_fetch_result"
+            );
+            Some(fields[1].to_ascii_lowercase())
+        };
+        ensure!(
+            updates.insert(fields[2].to_string(), new_oid).is_none(),
+            "invalid_remote_fetch_result"
+        );
+    }
+    Ok(updates)
 }
 pub fn pull(path: &Path, hash: &str, name: &str, branch: &str) -> Result<()> {
     pull_policy(path, hash, name, branch, Policy::Network)
@@ -622,8 +718,12 @@ fn pull_policy(path: &Path, hash: &str, name: &str, branch: &str, policy: Policy
     let cfg = config(path)?;
     let (url, _) = reviewed_endpoints(&initial, &cfg, name, policy)?;
     expected(path, hash, policy)?;
-    fetch_url(path, &url, name, policy)?;
-    integrate_fetched(path, initial, &local_snapshot, &cfg, name, branch)
+    let fetched = fetch_url(path, &url, name, policy)?;
+    let target = fetched
+        .get(&format!("refs/remotes/{name}/{branch}"))
+        .and_then(Option::as_deref)
+        .context("remote_branch_missing")?;
+    integrate_fetched(path, initial, &local_snapshot, &cfg, name, branch, target)
 }
 fn integrate_fetched(
     path: &Path,
@@ -632,6 +732,7 @@ fn integrate_fetched(
     cfg: &[(String, String)],
     name: &str,
     branch: &str,
+    target: &str,
 ) -> Result<()> {
     ensure!(
         &super::snapshot(path)? == local_snapshot && config(path)? == cfg,
@@ -639,7 +740,12 @@ fn integrate_fetched(
     );
     super::no_conflicts(path)?;
     super::no_external_filters(path)?;
-    let target = super::oid(path, &format!("refs/remotes/{name}/{branch}"))?;
+    // Pin the OID reported by our own fetch process. Shared remote-tracking
+    // refs and FETCH_HEAD may be replaced by an ordinary external Git fetch.
+    ensure!(
+        super::oid(path, target)? == target,
+        "invalid_remote_fetch_result"
+    );
     let ancestor = super::process::run(
         super::git_command(
             path,
@@ -647,7 +753,7 @@ fn integrate_fetched(
                 "merge-base",
                 "--is-ancestor",
                 initial.head.as_ref().unwrap(),
-                &target,
+                target,
             ],
         ),
         None,
@@ -674,9 +780,10 @@ fn integrate_fetched(
             "merge.autoStash=false",
             "merge",
             "--ff-only",
+            "--no-overwrite-ignore",
             "--no-edit",
             "--no-verify-signatures",
-            &target,
+            target,
         ],
         true,
     )?;
@@ -694,16 +801,17 @@ fn validate_branch(path: &Path, branch: &str) -> Result<()> {
     super::validate_branch(path, &format!("refs/heads/{branch}"))
         .map_err(|_| anyhow::anyhow!("invalid_remote_branch"))
 }
-pub fn push(path: &Path, hash: &str, name: &str, branch: &str) -> Result<()> {
+pub fn push(path: &Path, hash: &str, name: &str, branch: &str) -> Result<bool> {
     push_policy(path, hash, name, branch, Policy::Network)
 }
-fn push_policy(path: &Path, hash: &str, name: &str, branch: &str, policy: Policy) -> Result<()> {
+fn push_policy(path: &Path, hash: &str, name: &str, branch: &str, policy: Policy) -> Result<bool> {
     validate_branch(path, branch)?;
     let initial = expected(path, hash, policy)?;
     let local_branch = initial.branch.clone().context("remote_branch_required")?;
     let oid = initial.head.clone().context("remote_branch_required")?;
     let cfg = config(path)?;
     let (_, url) = reviewed_endpoints(&initial, &cfg, name, policy)?;
+    let local_snapshot = super::snapshot(path)?;
     expected(path, hash, policy)?;
     let refspec = format!("{oid}:refs/heads/{branch}");
     network(
@@ -721,12 +829,31 @@ fn push_policy(path: &Path, hash: &str, name: &str, branch: &str, policy: Policy
         policy,
         true,
     )?;
-    // Do not retarget a branch that was changed externally during the network.
-    let current = super::snapshot(path).context("remote_outcome_unknown")?;
-    if current.branch == local_branch {
-        set_upstream(path, &local_branch, name, branch).context("remote_outcome_unknown")?;
+    // The remote acknowledged the reviewed OID. Optional metadata failures
+    // must not turn that confirmed push into an ambiguous/retryable failure.
+    Ok(finish_push(
+        path,
+        &local_snapshot,
+        &cfg,
+        &local_branch,
+        name,
+        branch,
+    ))
+}
+fn finish_push(
+    path: &Path,
+    initial: &workbench_domain::Snapshot,
+    cfg: &[(String, String)],
+    local_branch: &str,
+    remote: &str,
+    target: &str,
+) -> bool {
+    if super::snapshot(path).is_ok_and(|current| &current == initial)
+        && config(path).is_ok_and(|current| current == cfg)
+    {
+        return set_upstream(path, local_branch, remote, target).is_ok();
     }
-    Ok(())
+    false
 }
 fn set_upstream(path: &Path, branch: &str, remote: &str, target: &str) -> Result<()> {
     let branch = branch
@@ -973,6 +1100,30 @@ mod tests {
         }
     }
     #[test]
+    fn remote_git_version_requires_supported_porcelain_format() {
+        for version in [
+            "git version 2.41.0",
+            "git version 2.54.0 (Apple Git-157)\n",
+            "git version 3.0.0",
+            "git version 12.1.8",
+        ] {
+            assert!(supported_git_version(version), "rejected {version}");
+        }
+        for version in [
+            "git version 1.99.0",
+            "git version 2.40.9 (Apple Git-150)",
+            "git version 2.41",
+            "git version 2.41.x",
+            "git version 2.41.0-rc1",
+            "git version 99999999999999.0.0",
+            "2.54.0",
+            "git version ",
+            "",
+        ] {
+            assert!(!supported_git_version(version), "accepted {version}");
+        }
+    }
+    #[test]
     fn unsafe_config_is_rejected_before_any_helper_or_hook_executes() {
         let f = Fixture::new();
         let marker = f._dir.path().join("executed");
@@ -1069,6 +1220,116 @@ mod tests {
         .unwrap();
         assert!(!result.status.success());
         assert!(!marker.exists());
+    }
+    #[test]
+    fn alternates_shell_command_is_rejected_and_disabled_at_network_boundary() {
+        let f = Fixture::new();
+        let marker = f._dir.path().join("alternate-command-executed");
+        let alternate = f.source.join(".git/objects");
+        fs::create_dir_all(f.client.join(".git/objects/info")).unwrap();
+        fs::write(
+            f.client.join(".git/objects/info/alternates"),
+            format!("{}\n", alternate.display()),
+        )
+        .unwrap();
+        git(
+            &f.client,
+            &[
+                "config",
+                "core.alternateRefsCommand",
+                &format!("touch '{}'", marker.display()),
+            ],
+        );
+        git(
+            &f.client,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://example.invalid/repo.git",
+            ],
+        );
+        let current = state(&f.client).unwrap();
+        assert!(!current.remotes[0].supported);
+        assert_eq!(
+            fetch(&f.client, &current.state_hash, "origin")
+                .unwrap_err()
+                .to_string(),
+            "unsupported_alternate_command"
+        );
+        assert!(!marker.exists());
+        f.advance();
+        // Even if the execution boundary encounters a command configured after
+        // preflight, its fixed override prevents the shell from being invoked.
+        let result = network(
+            &f.client,
+            &[
+                "fetch",
+                "--no-tags",
+                "--",
+                &f.url,
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            Policy::Fixture,
+            false,
+        );
+        assert!(result.is_ok());
+        assert!(!marker.exists());
+    }
+    #[test]
+    fn porcelain_fetch_reports_each_ref_state_and_never_prunes_local_tags() {
+        let f = Fixture::new();
+        let original = git(&f.client, &["rev-parse", "HEAD"]);
+        git(&f.client, &["tag", "local-only"]);
+        git(&f.client, &["config", "fetch.pruneTags", "true"]);
+        let unchanged = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        assert_eq!(
+            unchanged["refs/remotes/origin/main"].as_deref(),
+            Some(original.as_str())
+        );
+        git(&f.source, &["branch", "topic"]);
+        git(&f.source, &["push", f.bare.to_str().unwrap(), "topic"]);
+        let added = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        assert_eq!(
+            added["refs/remotes/origin/topic"].as_deref(),
+            Some(original.as_str())
+        );
+        f.advance();
+        let advanced = git(&f.source, &["rev-parse", "HEAD"]);
+        let updated = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        assert_eq!(
+            updated["refs/remotes/origin/main"].as_deref(),
+            Some(advanced.as_str())
+        );
+        git(&f.bare, &["update-ref", "refs/heads/main", &original]);
+        let forced = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        assert_eq!(
+            forced["refs/remotes/origin/main"].as_deref(),
+            Some(original.as_str())
+        );
+        git(&f.bare, &["update-ref", "-d", "refs/heads/topic"]);
+        let pruned = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        assert_eq!(pruned["refs/remotes/origin/topic"], None);
+        assert!(!pruned.contains_key("refs/remotes/origin/missing"));
+        assert!(super::super::ref_exists(&f.client, "refs/tags/local-only").unwrap());
+        let zero = "0".repeat(40);
+        for flag in [' ', '+', '*', '='] {
+            let text = format!("{flag} {zero} {original} refs/remotes/origin/main\n");
+            assert_eq!(
+                parse_fetch(text.as_bytes(), "origin").unwrap()["refs/remotes/origin/main"]
+                    .as_deref(),
+                Some(original.as_str())
+            );
+        }
+        for invalid in [
+            format!("! {zero} {original} refs/remotes/origin/main\n"),
+            format!("* {zero} {original} refs/heads/main\n"),
+            format!("* {zero} not-an-oid refs/remotes/origin/main\n"),
+            format!(
+                "* {zero} {original} refs/remotes/origin/main\n* {zero} {original} refs/remotes/origin/main\n"
+            ),
+        ] {
+            assert!(parse_fetch(invalid.as_bytes(), "origin").is_err());
+        }
     }
     #[test]
     fn fetch_prunes_only_reviewed_remote_and_state_pins_config_and_source() {
@@ -1187,7 +1448,8 @@ mod tests {
         let initial = f.state();
         let snapshot = super::super::snapshot(&f.client).unwrap();
         let cfg = config(&f.client).unwrap();
-        fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        let fetched = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        let target = fetched["refs/remotes/origin/main"].as_deref().unwrap();
         fs::write(f.client.join("hello.txt"), "external edit\n").unwrap();
         assert_eq!(
             integrate_fetched(
@@ -1196,7 +1458,8 @@ mod tests {
                 &snapshot,
                 &cfg,
                 "origin",
-                "main"
+                "main",
+                target
             )
             .unwrap_err()
             .to_string(),
@@ -1212,14 +1475,201 @@ mod tests {
             &["config", "remote.origin.url", "https://host/changed.git"],
         );
         assert_eq!(
-            integrate_fetched(&f.client, initial, &snapshot, &cfg, "origin", "main")
-                .unwrap_err()
-                .to_string(),
+            integrate_fetched(
+                &f.client, initial, &snapshot, &cfg, "origin", "main", target
+            )
+            .unwrap_err()
+            .to_string(),
             "stale_remote_state"
         );
         assert_eq!(
             fs::read_to_string(f.client.join("hello.txt")).unwrap(),
             "one\n"
+        );
+    }
+    #[test]
+    fn pull_never_overwrites_ignored_local_content() {
+        let f = Fixture::new();
+        fs::write(f.source.join(".gitignore"), "local.env\n").unwrap();
+        git(&f.source, &["add", ".gitignore"]);
+        git(&f.source, &["commit", "-m", "ignore local environment"]);
+        git(&f.source, &["push", f.bare.to_str().unwrap(), "main"]);
+        pull_policy(
+            &f.client,
+            &f.state().state_hash,
+            "origin",
+            "main",
+            Policy::Fixture,
+        )
+        .unwrap();
+        fs::write(f.client.join("local.env"), "my private configuration\n").unwrap();
+        assert!(f.state().clean);
+        let before = super::super::snapshot(&f.client).unwrap();
+        fs::write(f.source.join("local.env"), "incoming tracked content\n").unwrap();
+        git(&f.source, &["add", "--force", "local.env"]);
+        git(&f.source, &["commit", "-m", "track incoming environment"]);
+        git(&f.source, &["push", f.bare.to_str().unwrap(), "main"]);
+        assert!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "main",
+                Policy::Fixture
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(f.client.join("local.env")).unwrap(),
+            "my private configuration\n"
+        );
+        assert_eq!(super::super::snapshot(&f.client).unwrap(), before);
+    }
+    #[test]
+    fn pull_uses_its_own_fetch_oid_when_shared_remote_ref_is_replaced() {
+        let f = Fixture::new();
+        f.advance();
+        let initial = f.state();
+        let snapshot = super::super::snapshot(&f.client).unwrap();
+        let cfg = config(&f.client).unwrap();
+        let fetched = fetch_url(&f.client, &f.url, "origin", Policy::Fixture).unwrap();
+        let target = fetched["refs/remotes/origin/main"].as_deref().unwrap();
+        let tree = git(&f.client, &["rev-parse", &format!("{target}^{{tree}}")]);
+        let substituted = git(
+            &f.client,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                target,
+                "-m",
+                "unreviewed external fetch",
+            ],
+        );
+        git(
+            &f.client,
+            &["update-ref", "refs/remotes/origin/main", &substituted],
+        );
+        integrate_fetched(
+            &f.client, initial, &snapshot, &cfg, "origin", "main", target,
+        )
+        .unwrap();
+        assert_eq!(git(&f.client, &["rev-parse", "HEAD"]), target);
+        assert_eq!(
+            git(&f.client, &["rev-parse", "refs/remotes/origin/main"]),
+            substituted
+        );
+        assert_eq!(
+            pull_policy(
+                &f.client,
+                &f.state().state_hash,
+                "origin",
+                "missing",
+                Policy::Fixture
+            )
+            .unwrap_err()
+            .to_string(),
+            "remote_branch_missing"
+        );
+    }
+    #[test]
+    fn acknowledged_push_preserves_external_tracking_edits_and_reports_success() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let original_oid = git(&f.client, &["rev-parse", "HEAD"]);
+        // A test-only bare-server hook models an external local Git process
+        // editing metadata while the original endpoint acknowledges the push.
+        let hook = f.bare.join("hooks/post-receive");
+        fs::write(&hook, format!("#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE\n/usr/bin/git -C '{}' config remote.origin.url https://elsewhere.invalid/changed.git\n/usr/bin/git -C '{}' config branch.main.remote preserved\n/usr/bin/git -C '{}' config branch.main.merge refs/heads/preserved\n", f.client.display(), f.client.display(), f.client.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let updated = push_policy(
+            &f.client,
+            &f.state().state_hash,
+            "origin",
+            "acknowledged",
+            Policy::Fixture,
+        )
+        .unwrap();
+        assert!(!updated);
+        assert_eq!(
+            git(&f.bare, &["rev-parse", "refs/heads/acknowledged"]),
+            original_oid
+        );
+        assert_eq!(
+            git(&f.client, &["config", "remote.origin.url"]),
+            "https://elsewhere.invalid/changed.git"
+        );
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.remote"]),
+            "preserved"
+        );
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.merge"]),
+            "refs/heads/preserved"
+        );
+    }
+    #[test]
+    fn acknowledged_push_keeps_success_when_optional_tracking_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let hook = f.bare.join("hooks/post-receive");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf 'external lock' > '{}/.git/config.lock'\n",
+                f.client.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let updated = push_policy(
+            &f.client,
+            &f.state().state_hash,
+            "origin",
+            "confirmed",
+            Policy::Fixture,
+        )
+        .unwrap();
+        assert!(!updated);
+        assert_eq!(
+            git(&f.bare, &["rev-parse", "refs/heads/confirmed"]),
+            git(&f.client, &["rev-parse", "HEAD"])
+        );
+        fs::remove_file(f.client.join(".git/config.lock")).unwrap();
+        let snapshot = super::super::snapshot(&f.client).unwrap();
+        let cfg = config(&f.client).unwrap();
+        assert!(!finish_push(
+            &f._dir.path().join("missing"),
+            &snapshot,
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "confirmed"
+        ));
+        let tree = git(&f.client, &["rev-parse", "HEAD^{tree}"]);
+        let advanced = git(
+            &f.client,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &snapshot.head,
+                "-m",
+                "external local advance",
+            ],
+        );
+        git(&f.client, &["update-ref", "refs/heads/main", &advanced]);
+        assert!(!finish_push(
+            &f.client,
+            &snapshot,
+            &cfg,
+            "refs/heads/main",
+            "origin",
+            "confirmed"
+        ));
+        assert_eq!(
+            git(&f.client, &["config", "branch.main.merge"]),
+            "refs/heads/main"
         );
     }
     #[test]

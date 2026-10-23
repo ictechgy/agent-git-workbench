@@ -32,7 +32,7 @@
 
 ## 원격 Git
 
-- GitHub·GitLab·Bitbucket·자체 서버에 공통 SSH/HTTPS를 사용합니다. 제공자별 로그인·토큰 입력·PR 기능은 없습니다. 인증은 기존 SSH agent·기본 키·known-host 파일 또는 Apple Git 키체인 helper에서 준비해야 합니다.
+- GitHub·GitLab·Bitbucket·자체 서버에 공통 SSH/HTTPS를 사용하며 Apple Git 2.41 이상이 필요합니다. 제공자별 로그인·토큰 입력·PR 기능은 없습니다. 인증은 기존 SSH agent·기본 키·known-host 파일 또는 Apple Git 키체인 helper에서 준비해야 합니다.
 - 사용자 SSH config·별칭·ProxyCommand·임의 identity 경로, 대화형 인증, 임의 credential helper는 사용하지 않습니다. 파일 경로·`file://`·`git://`·외부 remote helper·URL rewrite·방향별 복수 URL·partial/promisor 저장소와 보안을 바꾸는 HTTP 설정은 거부합니다.
 - Fetch는 선택 원격의 브랜치 head만 갱신·prune합니다. 태그·서브모듈 동기화는 포함하지 않습니다. Pull은 깨끗한 폴더에서 빨리 감기로만, push는 확인한 commit을 한 브랜치로만 전송합니다.
 - 원격 설정과 추적 ref는 연결된 worktree에 공유됩니다. 확인 이후 URL·로컬 상태·원격 ref가 바뀌면 재확인이 필요합니다. 응답을 잃거나 시간이 초과되면 Git과 서버 상태를 확인하기 전 재시도하지 마세요. 클라이언트를 닫아도 서버 작업 취소가 확정되는 것은 아닙니다.

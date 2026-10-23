@@ -20,13 +20,19 @@ private final class TestService: @unchecked Sendable {
     }}
     guard bound == 0, Darwin.listen(listener, 16) == 0 else { Darwin.close(listener); throw POSIXError(.EIO) }
     let stop = self.stop
-    DispatchQueue.global().async {
+    // Blocking accept must not consume the shared Dispatch worker pool. With
+    // many concurrent fixtures it can otherwise queue replies behind idle listeners.
+    Thread.detachNewThread {
+      Thread.current.name = "river.test-service.accept"
       defer { Darwin.close(listener) }
       while !stop.value {
         let peer = Darwin.accept(listener, nil, nil)
         if peer < 0 { break }
         if stop.value { Darwin.close(peer); break }
-        DispatchQueue.global().async {
+        // Reply closures deliberately block on test gates. Give each peer its
+        // own thread so those gates cannot starve unrelated fixture requests.
+        Thread.detachNewThread {
+          Thread.current.name = "river.test-service.peer"
           defer { Darwin.close(peer) }
           var noSignal: Int32 = 1
           _ = setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
@@ -63,6 +69,18 @@ private final class TestService: @unchecked Sendable {
     Darwin.close(wake); Darwin.unlink(path)
   }
 }
+@Test func syntheticServiceAdmissionSurvivesManyIdleListeners() async throws {
+  let services = try (0..<96).map { _ in
+    try TestService { _ in ["schema_version": 1, "result": true] }
+  }
+  let client = ServiceClient(socketPath: services[0].path, timeoutSeconds: 1)
+  let admitted: Bool = try await client.call("admission_probe")
+  #expect(admitted)
+  // Keep every listener alive through the reply; this reproduces the previous
+  // shared-pool exhaustion instead of reducing fixture concurrency.
+  withExtendedLifetime(services) {}
+}
+
 private final class Flag: @unchecked Sendable {
   private let lock = NSLock(); private var stored = false
   var value: Bool { get { lock.withLock { stored } } set { lock.withLock { stored = newValue } } }

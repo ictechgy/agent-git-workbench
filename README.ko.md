@@ -20,7 +20,7 @@ A native macOS Git app for reviewing work across repositories and worktrees.
 
 - **Apple Silicon(arm64) 전용입니다.** 이번 릴리스에는 Intel 빌드가 없습니다.
 - **선언된 지원 대상은 macOS 14 이상입니다.** 실행 검증은 macOS 27.0.1에서만 했으며, 이전 버전에서의 호환성은 아직 확인하지 않았습니다.
-- **Apple 명령줄 Git이 필요합니다.** `/usr/bin/git --version`이 동작하지 않으면 `xcode-select --install`로 Apple의 [Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools)를 설치하세요. 내장 예제의 준비 스크립트에는 `python3`도 필요합니다. 앱과 엔진이 함께 들어 있으므로 다운로드한 앱을 쓰기 위해 Rust·Swift·Node를 설치하거나 소스를 빌드할 필요는 없습니다.
+- **Apple 명령줄 Git이 필요하며 원격 기능은 Git 2.41 이상을 요구합니다.** `/usr/bin/git --version`이 동작하지 않으면 `xcode-select --install`로 Apple의 [Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools)를 설치하세요. 내장 예제의 준비 스크립트에는 `python3`도 필요합니다. 앱과 엔진이 함께 들어 있으므로 다운로드한 앱을 쓰기 위해 Rust·Swift·Node를 설치하거나 소스를 빌드할 필요는 없습니다.
 
 1. `.dmg` 파일을 다운로드해 엽니다.
 2. **River.app**을 **응용 프로그램(Applications)** 폴더로 끌어 놓습니다.
@@ -133,7 +133,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-위 환경의 개발자 로컬 실행에서 **Rust 80개·Swift 73개 테스트**와 합성 CLI·네이티브 통신 시나리오, 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사를 통과했습니다(2026-10-23). CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
+위 환경의 개발자 로컬 실행에서 **Rust 88개·Swift 74개 테스트**와 합성 CLI·네이티브 통신 시나리오, 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사를 통과했습니다(2026-10-23). CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
 
 - [개발 환경·검증 명령](docs/development.md)
 - [구조와 실행 경계](docs/architecture.md)

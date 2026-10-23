@@ -2,16 +2,20 @@
 
 River connects through Git's SSH and HTTPS protocols rather than provider APIs. The same operations apply to GitHub, GitLab, Bitbucket and self-hosted servers that expose those protocols. Provider OAuth, pull-request APIs and issue integration are separate features.
 
+Remote operations require Apple command-line Git 2.41 or later. Pull captures its fetched commit from Git's structured fetch output, introduced in the [Git 2.41 release](https://github.com/git/git/blob/v2.41.0/Documentation/RelNotes/2.41.0.txt). River reports an unsupported-version error rather than falling back to mutable shared tracking references.
+
 ## User flow
 
 Open **원격** beside the current folder to inspect a remote's fetch/push URLs, fetched branch names and upstream counts. Add, edit or remove a remote there. Remote configuration and fetched references are shared by linked worktrees.
 
 - **Fetch** updates the selected remote's branch references without checking out files. It fetches branch heads, prunes stale heads in that remote's namespace and does not fetch tags or submodules.
-- **Pull** fetches the selected branch and integrates its immutable commit only when the current branch can fast-forward. The folder must be clean with no integration in progress. Divergence requires a separate merge/rebase workflow.
+- **Pull** fetches the selected branch and integrates its immutable commit from that fetch's structured result only when the current branch can fast-forward. The folder must be clean with no integration in progress. An incoming tracked file cannot overwrite an ignored local file. Divergence or a local-file collision requires a separate Git workflow.
 - **Push** sends the reviewed local commit to exactly one selected remote branch. It does not force, mirror, follow tags or push submodules. A server can reject the update, including a non-fast-forward update or protected branch.
 - **Clone** creates a new folder selected in the clone sheet, then opens it as a normal River workspace. Existing destinations are preserved. A completed clone remains on disk if workspace registration subsequently fails.
 
 Pull and push require a confirmation showing the folder, local branch, URL and remote branch. The engine rechecks the reviewed state before performing the operation. Changes to the folder, HEAD, branch, remote configuration or fetched references make that state stale; refresh and confirm again.
+
+After a confirmed push, River configures upstream tracking only if the captured local state and configuration still match. A concurrent external edit is preserved. If tracking setup is skipped or fails, the response still reports the confirmed push and asks the user to inspect tracking settings.
 
 ## Authentication and supported URLs
 

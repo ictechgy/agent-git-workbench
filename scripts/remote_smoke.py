@@ -108,6 +108,24 @@ def main():
 
             expect_error(rpc("fetch_remote", expected_state_hash=state()["state_hash"], remote="gitlab", unexpected=True))
             report["production_rpc"].append("unknown parameters rejected")
+
+            # An object alternate can activate a separate Git shell-command knob.
+            # Prove the production configuration boundary rejects it before any
+            # connection, rather than relying on hook/credential restrictions.
+            alternate = base / "alternate-objects"
+            alternate.mkdir()
+            alternates_file = source / ".git/objects/info/alternates"
+            alternates_file.write_text(str(alternate) + "\n")
+            marker = base / "unexpected-alternate-command"
+            git(source, "config", "core.alternateRefsCommand", "/usr/bin/touch " + str(marker))
+            blocked = state()
+            assert blocked["remotes"][0]["supported"] is False
+            assert expect_error(rpc("fetch_remote", expected_state_hash=blocked["state_hash"], remote="gitlab")) == "unsupported_alternate_command"
+            assert not marker.exists()
+            git(source, "config", "--unset", "core.alternateRefsCommand")
+            alternates_file.unlink()
+            report["production_rpc"].append("alternate-object shell helper rejected before transport")
+
             expect_ok(rpc("configure_remote", expected_state_hash=state()["state_hash"], action="remove", name="gitlab"))
             assert state()["remotes"] == []
             assert original == (git(source, "rev-parse", "HEAD"), git(source, "status", "--porcelain"))
