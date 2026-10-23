@@ -12,7 +12,24 @@ A native macOS Git app for reviewing work across repositories and worktrees.
 
 **우리가 만드는 강줄기들이 모여 큰 바다를 만듭니다. 바다는 함께 만드는 소프트웨어입니다.**
 
-> 초기 개발 단계입니다. SwiftUI/AppKit 앱과 Rust 로컬 엔진이 동작하지만, 정식 릴리스·배포 설치기는 아직 없습니다. 라이선스는 미확정입니다.
+> 초기 알파 단계입니다. 테스트용 macOS 앱을 다운로드할 수 있습니다. 안정 버전은 아직 없으며 라이선스는 미확정입니다.
+
+## macOS에 설치하기
+
+**[Apple Silicon용 River 0.1.0-alpha.1 다운로드](https://github.com/ictechgy/agent-git-workbench/releases/download/v0.1.0-alpha.1/River-0.1.0-alpha.1-macos-arm64.dmg)** · [릴리스 정보와 체크섬](https://github.com/ictechgy/agent-git-workbench/releases/tag/v0.1.0-alpha.1)
+
+- **Apple Silicon(arm64) 전용입니다.** 이번 릴리스에는 Intel 빌드가 없습니다.
+- **선언된 지원 대상은 macOS 14 이상입니다.** 실행 검증은 macOS 27.0.1에서만 했으며, 이전 버전에서의 호환성은 아직 확인하지 않았습니다.
+- **Apple 명령줄 Git이 필요합니다.** `/usr/bin/git --version`이 동작하지 않으면 `xcode-select --install`로 Apple의 [Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools)를 설치하세요. 앱과 엔진이 함께 들어 있으므로 다운로드한 앱을 쓰기 위해 Rust·Swift·Node를 설치하거나 소스를 빌드할 필요는 없습니다.
+
+1. `.dmg` 파일을 다운로드해 엽니다.
+2. **River.app**을 **응용 프로그램(Applications)** 폴더로 끌어 놓습니다.
+3. River 디스크 이미지를 추출한 뒤 **응용 프로그램** 폴더에서 **River**를 엽니다.
+4. **예제로 먼저 둘러보기**를 선택해 합성 저장소로 사용해 본 뒤 자신의 프로젝트를 여세요.
+
+앱·내장 엔진·DMG의 Developer ID 서명을 검증했습니다. 이번 알파는 **Apple 공증(notarization)을 받지 않아** 첫 실행이 차단될 수 있습니다. 자세한 검증 상태는 [릴리스 정보](docs/releases/v0.1.0-alpha.1.md)를 확인하세요.
+
+macOS가 개발자를 확인할 수 없거나 앱을 검사할 수 없다는 이유로 실행을 막으면 릴리스 상태와 다운로드 출처를 먼저 확인하세요. 계속 진행하기로 했다면 River 실행을 한 번 시도한 뒤 **시스템 설정 → 개인정보 보호 및 보안 → 확인 없이 열기(Open Anyway)**에서 허용하고 **열기**를 확인합니다. 자세한 절차는 [Apple 안내](https://support.apple.com/en-us/102445)를 따르세요.
 
 ![옅은 물빛 배경 위에 변경 파일 목록과 넓은 한 화면 Diff를 표시한 River Clear 네이티브 작업 화면](docs/images/workbench-light.png)
 
@@ -51,18 +68,9 @@ A native macOS Git app for reviewing work across repositories and worktrees.
 
 </details>
 
-## 빌드하고 실행하기
+## 처음 실행하기
 
-필요한 도구는 macOS, Swift 6 이상을 포함한 Xcode, Rust/Cargo, Git, Python 3입니다. 검증에는 전체 Xcode를 사용했으며 Command Line Tools만 설치한 환경은 검증하지 않았습니다. Rust 코드는 edition 2024를 사용합니다. SwiftPM 배포 대상은 macOS 14 이상이며, 현재 검증 환경은 macOS 27.0.1 / Swift 6.4 / Rust 1.97.1 / Git 2.54.0 / Python 3.9.6입니다. macOS 14에서의 실행은 아직 검증하지 않았습니다.
-
-```sh
-git clone https://github.com/ictechgy/agent-git-workbench.git
-cd agent-git-workbench
-python3 scripts/build_macos.py
-open "build/macos/River.app"
-```
-
-빌드 스크립트가 Rust 엔진과 Swift 앱을 함께 빌드해 개발용 서명으로 묶습니다. Node·npm·웹 서버는 필요 없습니다. 앱은 번들에 포함된 엔진을 자동으로 실행하므로, 연결 주소나 Unix 소켓 경로를 입력할 필요가 없습니다.
+앱은 번들에 포함된 엔진을 자동으로 실행하므로, 연결 주소나 Unix 소켓 경로를 입력할 필요가 없습니다.
 
 1. 시작 화면에서 **예제로 먼저 둘러보기**를 선택합니다. 앱 전용 위치에 합성 저장소 두 개와 준비 작업을 만듭니다.
 2. 저장소를 골라 상단의 브랜치와 **작업용 폴더 / 원래 프로젝트 폴더**를 확인합니다. 폴더 버튼을 누르면 전체 경로 조회·복사, Finder에서 열기, 폴더 전환을 할 수 있습니다.
@@ -93,11 +101,28 @@ open "build/macos/River.app"
 - **준비와 쓰기:** 원래 checkout을 바꾸지 않고 작업용 폴더를 준비합니다. source snapshot이나 신뢰 기준이 바뀌면 중단하며, 조용히 재계획하거나 reset/clean으로 복구하지 않습니다. Recipe는 OS 보안 sandbox가 아닙니다.
 - **표시와 자원:** 그래프·브랜치 기록은 최근 최대 80개 커밋, Diff 표시는 5,000줄·512 KiB로 제한합니다. 대형 저장소의 속도·메모리·에너지는 아직 계측하지 않았습니다.
 - **복구와 새로고침:** 준비 요청의 응답을 잃으면 앱 세션에 원래 프로젝트 안내가 남습니다. 작업을 반복하기 전에 해당 프로젝트의 작업 목록과 Git 상태를 확인해야 하며, 안내는 앱 재시작 뒤 복원되지 않습니다. Git 속성·Diff 설정을 바꾼 뒤에는 새로고침하세요. 이미 엔진에서 시작한 읽기는 클라이언트가 취소해도 계속될 수 있습니다.
-- **배포:** 현재 `.app`은 개발용 ad-hoc 서명입니다. notarization·설치기·OS 입력 및 VoiceOver 검증은 완료하지 않았습니다.
+- **배포와 검증:** 현재 사전 릴리스 DMG는 Apple Silicon용입니다. 서명·notarization 상태는 [릴리스 정보](docs/releases/v0.1.0-alpha.1.md)를 확인하세요. Intel 빌드, macOS 14–26 실행, OS 입력 및 VoiceOver 검증은 완료하지 않았습니다.
 
 자세한 범위와 알려진 문제는 [현재 제한](docs/limitations.md)을 확인하세요.
 
 ## 개발과 검증
+
+### 소스에서 빌드하기
+
+필요한 도구는 macOS, Swift 6 이상을 포함한 Xcode, Rust/Cargo, Git, Python 3입니다. 검증에는 전체 Xcode를 사용했으며 Command Line Tools만 설치한 빌드 환경은 검증하지 않았습니다. Rust 코드는 edition 2024를 사용합니다.
+
+검증 환경은 macOS 27.0.1 / Swift 6.4 / Rust 1.97.1 / Git 2.54.0 / Python 3.9.6입니다. 이 목록은 테스트한 버전이며 전체 최소 버전 호환성 표는 아닙니다.
+
+```sh
+git clone https://github.com/ictechgy/agent-git-workbench.git
+cd agent-git-workbench
+python3 scripts/build_macos.py
+open "build/macos/River.app"
+```
+
+빌드 스크립트가 Rust 엔진과 Swift 앱을 함께 빌드해 개발용 ad-hoc 서명으로 묶습니다. Node·npm·웹 서버는 필요 없습니다. 배포 패키징과 서명 옵션은 [개발 가이드](docs/development.md)를 확인하세요.
+
+### 검증
 
 ```sh
 cargo test --workspace

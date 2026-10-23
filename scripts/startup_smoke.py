@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise app-owned bootstrap using only new temporary repositories and the packaged helper."""
+import argparse
 import hashlib
 import json
 import os
@@ -60,7 +61,13 @@ def snapshot(repo):
 
 
 def main():
-    helper = ROOT / "build/macos/River.app/Contents/Helpers/workbench"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app", type=Path, default=ROOT / "build/macos/River.app",
+                        help="test the helper from an existing packaged app")
+    args = parser.parse_args()
+    helper = args.app.resolve() / "Contents/Helpers/workbench"
+    if not helper.is_file():
+        parser.error("the app must contain Contents/Helpers/workbench; build it first")
     bin_dir = Path(run("swift", "build", "--package-path", ROOT / "apps/macos", "--show-bin-path").strip())
     probe = bin_dir / "workbench-startup-probe"
     # Finder-like launch: no WORKBENCH_SOCKET, WORKBENCH_SERVICE, or developer PATH.

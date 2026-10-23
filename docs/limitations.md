@@ -4,13 +4,22 @@
 
 ## 아직 지원하지 않는 기능
 
-- Windows/Linux 네이티브 GUI, 배포 설치기·notarization.
+- Windows/Linux 네이티브 GUI.
 - fetch·pull·push 등 원격 동기화, 변경 되돌리기(discard), merge·rebase·충돌 해결 UI.
 - 일반적인 branch CRUD·checkout UI, history rewriting, 임의 행 스테이징. 브랜치 생성은 현재 Task 준비 과정에서만 지원합니다.
 - Stash 적용·삭제. 현재 Stash는 목록·파일·Diff 읽기 전용입니다.
 - GUI에서 다중 저장소·그룹·recipe·trust를 자유롭게 편집하는 기능.
 - AI 도구 직접 실행, MCP 연결, 자동 CI·빌드·테스트·병합.
 - 일반적인 실제 Xcode 프로젝트 편집. 첫 iOS adapter는 합성 FixtureApp/Debug의 xcconfig 두 key만 지원합니다.
+
+## 배포·호환성
+
+- `0.1.0-alpha.1`은 Apple Silicon(arm64)용 사전 릴리스 DMG입니다. Intel·universal2 공개 빌드는 없습니다. [다운로드와 설치 방법](../README.ko.md#macos에-설치하기)을 확인하세요.
+- 선언된 최소 대상은 macOS 14이지만 실행 검증은 macOS 27.0.1에서만 했습니다. macOS 14–26에서의 호환성은 아직 검증하지 않았습니다.
+- 앱과 Rust 엔진은 함께 배포하지만 Git은 포함하지 않습니다. 런타임은 `/usr/bin:/bin:/usr/sbin:/sbin` 경로를 사용하므로 Apple Command Line Tools 또는 Xcode의 Git이 필요합니다. Homebrew 전용 경로의 Git은 사용하지 않습니다.
+- 공개 DMG의 서명과 Apple notarization 상태는 [릴리스 정보](releases/v0.1.0-alpha.1.md)에 기록합니다. 로컬 빌드의 기본 ad-hoc 서명과 혼동하지 마세요. notarization이 완료되지 않은 앱은 macOS의 실행 확인에 막힐 수 있습니다.
+- 자동 업데이트 기능은 없습니다. 새 버전은 GitHub Releases에서 다운로드해 교체합니다.
+- 라이선스는 미확정이며 현재 Cargo 메타데이터는 `UNLICENSED`입니다.
 
 ## Git·준비 정책
 

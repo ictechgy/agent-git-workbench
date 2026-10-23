@@ -8,9 +8,26 @@
 
 **Many rivers. One ocean.** Our streams of work come together into the software we build.
 
-> Early development. The SwiftUI/AppKit app and local Rust engine work today, but there is no stable release or distribution installer yet. The license is still undecided.
+> Early alpha. Downloadable macOS builds are available for testing. There is no stable release yet, and the license is still undecided.
 
 The app UI and detailed guides are currently in Korean. English translations of UI labels below are provided for reference.
+
+## Install on macOS
+
+**[Download River 0.1.0-alpha.1 for Apple Silicon](https://github.com/ictechgy/agent-git-workbench/releases/download/v0.1.0-alpha.1/River-0.1.0-alpha.1-macos-arm64.dmg)** · [Release notes and checksums](https://github.com/ictechgy/agent-git-workbench/releases/tag/v0.1.0-alpha.1)
+
+- **Apple Silicon (arm64) only.** This release does not include an Intel build.
+- **macOS 14 or later is the declared target.** Runtime testing has only covered macOS 27.0.1; compatibility with older supported versions has not been verified.
+- **Apple command-line Git is required.** If `/usr/bin/git --version` does not work, install Apple's [Command Line Tools](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools) with `xcode-select --install`. River includes its app and engine; Rust, Swift, Node, and a source build are not required to use the download.
+
+1. Download and open the `.dmg` file.
+2. Drag **River.app** into **Applications**.
+3. Eject the River disk image, then open **River** from **Applications**.
+4. Choose **Explore the example** (`예제로 먼저 둘러보기`) to try synthetic repositories before opening your own project.
+
+The app, bundled engine, and DMG have verified Developer ID signatures. This alpha is **not notarized by Apple**, so macOS may block its first launch. See the [release notes](docs/releases/v0.1.0-alpha.1.md) for verification details.
+
+If macOS blocks opening because it cannot verify the developer or check the app, review the release status and source first. If you choose to continue, use **System Settings → Privacy & Security → Open Anyway** after attempting to open River, then confirm **Open**, as described in [Apple's guide](https://support.apple.com/en-us/102445).
 
 ![River Clear native workbench with a changed-file list and broad unified diff on light water-colored surfaces](docs/images/workbench-light.png)
 
@@ -49,20 +66,9 @@ Selecting a branch reads its history without checking it out. This synthetic exa
 
 </details>
 
-## Build and run
+## First launch
 
-You need macOS, Xcode with Swift 6 or later, Rust/Cargo, Git, and Python 3. Validation used full Xcode; a Command Line Tools-only setup has not been tested. The Rust code uses edition 2024. The SwiftPM deployment target is macOS 14 or later, but runtime behavior on macOS 14 has not been tested.
-
-The tested environment is macOS 27.0.1, Swift 6.4, Rust 1.97.1, Git 2.54.0, and Python 3.9.6. These are tested versions, not a complete minimum-version compatibility matrix.
-
-```sh
-git clone https://github.com/ictechgy/agent-git-workbench.git
-cd agent-git-workbench
-python3 scripts/build_macos.py
-open "build/macos/River.app"
-```
-
-The script builds the Rust engine and Swift app into a development-signed bundle. No Node, npm, or web server is required. The app starts its bundled engine automatically; you do not need to enter a connection address or Unix socket path.
+The app starts its bundled engine automatically; you do not need to enter a connection address or Unix socket path.
 
 1. Choose **Explore the example** (`예제로 먼저 둘러보기`) on the start screen. This creates two synthetic repositories and a preparation task in the app's own storage.
 2. Select a repository and check its branch and **Task working directory / Original project directory** (`작업용 폴더 / 원래 프로젝트 폴더`) in the context row. Click the folder control to inspect or copy the full path, open Finder, or switch folders.
@@ -93,11 +99,28 @@ Settings, recent projects, and the task journal live in `~/Library/Application S
 - **Preparation and writes:** Working directories are prepared without changing the original checkout. A changed source snapshot or trust basis stops execution; there is no silent replanning or recovery through reset/clean. Recipes are not an OS security sandbox.
 - **Display and resources:** Graph and branch history show at most 80 recent commits. Diff display is capped at 5,000 lines and 512 KiB. Speed, memory, and energy use on large repositories have not been measured.
 - **Recovery and refresh:** Lost preparation responses leave an origin-project notice for the app session; check that project's task list and Git state before repeating work. These notices do not survive an app restart. Use Refresh after changing Git attributes or diff settings. A read already started in the engine may continue after the client cancels it.
-- **Distribution:** The `.app` uses an ad-hoc development signature. Notarization, an installer, OS-level input testing, and VoiceOver validation are not complete.
+- **Distribution and validation:** The current prerelease DMG is for Apple Silicon. See its [release notes](docs/releases/v0.1.0-alpha.1.md) for signature and notarization status. Intel builds, runtime testing on macOS 14–26, OS-level input testing, and VoiceOver validation are not complete.
 
 See [limitations and known issues (Korean)](docs/limitations.md) for details.
 
 ## Development and validation
+
+### Build from source
+
+You need macOS, Xcode with Swift 6 or later, Rust/Cargo, Git, and Python 3. Validation used full Xcode; a Command Line Tools-only build setup has not been tested. The Rust code uses edition 2024.
+
+The tested environment is macOS 27.0.1, Swift 6.4, Rust 1.97.1, Git 2.54.0, and Python 3.9.6. These are tested versions, not a complete minimum-version compatibility matrix.
+
+```sh
+git clone https://github.com/ictechgy/agent-git-workbench.git
+cd agent-git-workbench
+python3 scripts/build_macos.py
+open "build/macos/River.app"
+```
+
+The script builds the Rust engine and Swift app into an ad-hoc development-signed bundle. No Node, npm, or web server is required. For release packaging and signing options, see the [development guide (Korean)](docs/development.md).
+
+### Validation
 
 ```sh
 cargo test --workspace
