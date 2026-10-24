@@ -23,7 +23,11 @@ struct AgentGitWorkbenchApp: App {
             guard let store else { return "앱이 시작되는 중입니다. 잠시 후 다시 시도해 주세요." }
             return store.updateRestartBlocker
           },
-          warning: { [weak store = store] in store?.updateRestartWarning }
+          warning: { [weak store = store] in
+            RestartConsentSnapshot(
+              message: store?.updateRestartWarning,
+              identity: store?.updateRestartConsentIdentity ?? [])
+          }
         )
         updates.start()
         await store.startup()

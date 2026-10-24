@@ -146,7 +146,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift test --package-path apps/macos
 ```
 
-2026-10-24 개발자 로컬 실행에서 **Swift 164개·Python 56개 테스트**를 통과했습니다. Rust 소스는 alpha.5와 같으며 기존 **119개 테스트** 검증을 유지합니다. 합성 CLI·네이티브 통신 시나리오와 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사도 통과했습니다. CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
+2026-10-24 개발자 로컬 실행에서 **Swift 168개·Python 56개 테스트**를 통과했습니다. Rust 소스는 alpha.5와 같으며 기존 **119개 테스트** 검증을 유지합니다. 합성 CLI·네이티브 통신 시나리오와 공개 GitHub·GitLab 읽기 전용 clone·fetch 검사도 통과했습니다. CI는 아직 없으며 실제 사용자 저장소나 대형 저장소 성능을 검증한 수치도 아닙니다.
 
 - [개발 환경·검증 명령](docs/development.md)
 - [구조와 실행 경계](docs/architecture.md)

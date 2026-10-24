@@ -24,6 +24,7 @@ public final class TaskContextStore: ObservableObject {
   @Published private(set) var inFlightWorkCount = 0
   // Session-only uncertainty survives navigation; an update asks the user to inspect it.
   private(set) var updateUncertainWriteOrigins: Set<String> = []
+  private(set) var updateUncertainWriteRevision: UInt64 = 0
   @Published public private(set) var loaded = false
   @Published public private(set) var message: String?
   private var client: ServiceClient?
@@ -140,6 +141,8 @@ public final class TaskContextStore: ObservableObject {
     if let failure = error as? ServiceFailure {
       guard failure.code.hasSuffix("outcome_unknown") else { return }
     } else if (error as? TransportFailure)?.requestMayHaveBeenSent == false { return }
+    // A second unknown request at the same origin still invalidates prior consent.
+    updateUncertainWriteRevision += 1
     updateUncertainWriteOrigins.insert(HandoffText.field(origin))
   }
   public func save() async {

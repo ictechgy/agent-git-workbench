@@ -2195,3 +2195,89 @@ func updateRestartDoesNotInventContextUncertaintyForKnownRejectedWrites(failure:
   #expect(store.updateRestartBlocker == nil && store.updateRestartWarning == nil)
   #expect(store.taskContext.isDirty)
 }
+
+@Test(arguments: ["materialize", "retry_operation"]) @MainActor
+func confirmedPreparationReceiptBlocksUpdateWhenFollowingMetadataReadFails(method: String) async throws {
+  let first = ScopedContextReplies()
+  first.preparationState = method == "materialize" ? "waiting_for_worktree" : "failed"
+  let other = Replies()
+  let serverA = try TestService { request in
+    var response = first.respond(request)
+    if request["method"] as? String == method, var op = response["result"] as? [String: Any] {
+      op["status"] = "running"; response["result"] = op
+      first.lock.withLock { first.listFails = true }
+    }
+    return response
+  }
+  let serverB = try TestService { other.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  let operation = try #require(store.operations.first)
+  let eligibility = store.preparationEligibility(for: operation.id)
+  #expect(method == "materialize" ? eligibility.materialize : eligibility.retry)
+  #expect(store.updateRestartBlocker == nil)
+  await store.operate(method, op: operation)
+  #expect(!store.busy && !store.hasRunningOperation)
+  #expect(first.lock.withLock { first.preparationCalls } == [method])
+  #expect(store.updateRestartBlocker != nil)
+  store.socketPath = serverB.path; await store.connect()
+  #expect(store.updateRestartBlocker != nil)
+  first.lock.withLock { first.listFails = false; first.preparationState = "ready" }
+  await store.refresh()
+  #expect(store.updateRestartBlocker != nil)
+  store.socketPath = serverA.path; await store.connect()
+  #expect(store.updateRestartBlocker == nil)
+}
+
+@Test(arguments: ["same-origin", "fifth-hidden-origin"]) @MainActor
+func everyUncertainContextWriteChangesConsentIdentityBeyondVisibleOriginPrefix(scenario: String) async throws {
+  let replies = Replies()
+  let server = try TestService { request in
+    if request["method"] as? String == "save_task_context" {
+      return ["schema_version": 1, "error": ["code": "write_outcome_unknown", "message": "synthetic uncertain write"]]
+    }
+    return replies.respond(request)
+  }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  let client = ServiceClient(socketPath: server.path)
+  func write(origin: String) async {
+    store.taskContext.configure(
+      client: client, workspace: "fixture-" + origin, location: .init(repoId: "a"),
+      contextOperationID: nil, operation: nil, title: origin, updateOrigin: origin)
+    await store.taskContext.refresh()
+    store.taskContext.draft?.notes = "another uncertain change"
+    await store.taskContext.save()
+  }
+  let originalOrigins = scenario == "same-origin" ? ["A"] : ["A", "B", "C", "D"]
+  for origin in originalOrigins { await write(origin: origin) }
+  let displayed = try #require(store.updateRestartWarning)
+  let identity = store.updateRestartConsentIdentity
+  let revision = store.taskContext.updateUncertainWriteRevision
+  await write(origin: scenario == "same-origin" ? "A" : "Z-hidden-fifth")
+  #expect(store.updateRestartBlocker == nil)
+  #expect(store.updateRestartWarning == displayed)
+  #expect(store.taskContext.updateUncertainWriteRevision == revision + 1)
+  #expect(store.updateRestartConsentIdentity != identity)
+  #expect(store.taskContext.updateUncertainWriteOrigins.count == (scenario == "same-origin" ? 1 : 5))
+}
+
+@Test @MainActor func replacementUnknownSubmissionWithSameDisplayChangesFullConsentIdentity() async throws {
+  let replies = RemoteReplies(); replies.failure = "unknown"
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  func uncertainPush() async throws {
+    await store.loadRemoteState()
+    let plan = try store.remotePlan(.push, remote: "origin", branch: "main")
+    do { try await store.executeRemote(plan); Issue.record("Expected an uncertain remote reply") }
+    catch UIError.remoteOutcomeUnknown {}
+  }
+  try await uncertainPush()
+  let warning = try #require(store.submissionWarnings.first)
+  let displayed = store.updateRestartWarning
+  let identity = store.updateRestartConsentIdentity
+  store.dismissSubmissionWarning(warning.id)
+  try await uncertainPush()
+  #expect(store.submissionWarnings.count == 1)
+  #expect(store.submissionWarnings.first?.id != warning.id)
+  #expect(store.updateRestartWarning == displayed)
+  #expect(store.updateRestartConsentIdentity != identity)
+}

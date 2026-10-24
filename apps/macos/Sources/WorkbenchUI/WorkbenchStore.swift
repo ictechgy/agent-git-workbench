@@ -62,6 +62,7 @@ public final class WorkbenchStore: ObservableObject {
   private var contextFlightObserver: AnyCancellable?
   @Published private var contextWorkInFlight = false
   @Published private var pendingTaskSubmissions = 0
+  private var updateUnknownTaskSubmissionRevision: UInt64 = 0
   // Running tasks remain relevant to updates after switching to another workspace.
   private struct UpdateWorkspaceIdentity: Hashable {
     let socket: String
@@ -308,6 +309,13 @@ public final class WorkbenchStore: ObservableObject {
       warnings.append("작업 정보 변경 결과를 확인하지 못한 위치가 있습니다: " + taskContext.updateUncertainWriteOrigins.sorted().prefix(4).joined(separator: "; ") + ". 저장소의 작업 정보와 검사 기록을 확인하세요.")
     }
     return warnings.isEmpty ? nil : warnings.joined(separator: "\n\n")
+  }
+  /// Display is bounded independently; every uncertain request contributes to consent identity.
+  public var updateRestartConsentIdentity: [String] {
+    ["context-writes:\(taskContext.updateUncertainWriteRevision)",
+     "task-submissions:\(updateUnknownTaskSubmissionRevision)"]
+      + submissionWarnings.map { "submission:" + $0.id }.sorted()
+      + unresolvedOperationIDs.map { "unresolved:" + workspaceSession.uuidString + ":" + $0 }.sorted()
   }
   private func rememberUpdateOperation(_ operation: WorkbenchOperation, identity: UpdateWorkspaceIdentity, title: String) {
     var running = updateRunningOperations[identity] ?? []
@@ -1011,8 +1019,13 @@ public final class WorkbenchStore: ObservableObject {
     guard (method == "materialize" && eligibility.materialize)
       || (method == "retry_operation" && eligibility.retry)
       || (method == "cancel_operation" && eligibility.cancel) else { return }
+    let updateIdentity = UpdateWorkspaceIdentity(
+      socket: connectedSocketPath ?? socketPath, workspaceID: workspace?.id ?? "")
+    let originTitle = workspaceTitle
     await mutation(method) {
-      let _: WorkbenchOperation = try await client.call(method, params: ["op_id": .string(op.id)])
+      let receipt: WorkbenchOperation = try await client.call(method, params: ["op_id": .string(op.id)])
+      // The confirmed receipt is authoritative even if follow-up reads fail or the user navigates.
+      self.rememberUpdateOperation(receipt, identity: updateIdentity, title: originTitle)
     }
   }
   public func planTask(group: String, label: String, slug: String, mode: String) async throws
@@ -1063,6 +1076,7 @@ public final class WorkbenchStore: ObservableObject {
     } catch {
       guard !(error is ServiceFailure),
         (error as? TransportFailure)?.requestMayHaveBeenSent != false else { throw error }
+      updateUnknownTaskSubmissionRevision += 1
       let warning = TaskSubmissionWarning(id: warningID, workspaceTitle: originTitle,
         workspacePath: originPath, message: UIError.submissionOutcomeUnknown.localizedDescription)
       if !submissionWarnings.contains(where: { $0.id == warningID }) { submissionWarnings.append(warning) }

@@ -12,6 +12,8 @@ River alpha.6 adds native updates using the pinned Sparkle 2.10.0 framework. **A
 - An uncertain request outcome needs inspection of the original repository and a fresh explicit acknowledgement before restart. This does not clear the original notice or repeat a write.
 - Choosing **나중에** keeps River open. Use the update command or **업데이트 설치 및 재시작…** in Settings to continue later. Eligibility is checked again before exit.
 
+If activity changes during shutdown cleanup and the final gate cancels restart, an idle service may already have stopped; reconnect the workspace if needed. This is an availability limit, not permission to retry an uncertain Git write.
+
 Repository files and commits are not an updater's input. The updater replaces the application bundle. River's existing idle-service cleanup preserves busy and borrowed engines. Network/signature failures leave the installed app in place; try again later or install a release DMG manually.
 
 The current distribution is Apple Silicon only, with macOS 14 declared as the minimum. Apple notarization is still incomplete. These update checks do not certify older-macOS operation, VoiceOver or unattended installation.
@@ -47,7 +49,7 @@ Keep the increasing numeric build number, application identifier and existing up
      --expected-source FULL_RELEASE_SOURCE_SHA
    ```
 
-   Add `--publish` only after the check succeeds. The publisher verifies the signed feed, published release, three anonymous downloads, GitHub asset digests, source manifest and peeled tag before changing only the `updates` branch. Existing feed updates must advance the build number; an identical feed is idempotent. Ref changes use fast-forward semantics, preserve the existing tree and do not retry an overwrite after a conflict.
+   Add `--publish` only after the check succeeds. The publisher verifies the signed feed, published release, three anonymous downloads, GitHub asset digests, source manifest and peeled tag before changing only the `updates` branch. Existing feed updates must advance the build number; an identical feed is idempotent. Ref changes use fast-forward semantics, preserve the existing tree and do not retry an overwrite after a conflict. Release/tag validation and feed advancement are separate server operations: keep published release assets and tags immutable and avoid concurrent replacement. Branch atomicity does not make those checks one transaction.
 5. Verify with only the public key—no Keychain/private key is required:
 
    ```sh

@@ -234,7 +234,7 @@ private final class FakeBackend: UpdateBackend {
   var warning = "Uncertain push in the original workspace"
   var acknowledged: [String?] = []
   var installs = 0
-  gate.warning = { warning }
+  gate.warning = { RestartConsentSnapshot(message: warning, identity: []) }
   gate.confirm = {
     acknowledged.append($0)
     return true
@@ -253,4 +253,31 @@ private final class FakeBackend: UpdateBackend {
   }
   #expect(gate.resume() != nil)
   #expect(installs == 1)
+}
+
+@Test(arguments: ["same-origin", "fifth-hidden-origin"]) @MainActor
+func unchangedDisplayForNewUncertainWriteRequiresFreshTerminationConsent(scenario: String) {
+  let gate = UpdateRestartGate()
+  gate.blocker = { nil }
+  var identity = ["context-write:1", scenario]
+  let unchangedDisplay = "The original four warning origins are still shown"
+  // The complete opaque identity crosses the same bridge as the bounded copy.
+  gate.warning = { RestartConsentSnapshot(message: unchangedDisplay, identity: identity) }
+  var confirmations = 0
+  gate.confirm = { _ in
+    confirmations += 1
+    return true
+  }
+  gate.postpone {}
+  #expect(gate.resume() == nil && confirmations == 1)
+  identity[0] = "context-write:2"
+  #expect(identity[0] == "context-write:2")
+  #expect(gate.permitsTermination())
+  #expect(confirmations == 2)
+  gate.terminationWasCancelled()
+  gate.confirm = { _ in
+    identity[0] = "context-write:3"
+    return true
+  }
+  #expect(gate.resume() != nil)  // An identity change inside the modal also invalidates consent.
 }

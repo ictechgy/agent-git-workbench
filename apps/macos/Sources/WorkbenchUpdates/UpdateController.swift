@@ -68,17 +68,27 @@ private final class SparkleBackend: UpdateBackend {
   func check() { controller.checkForUpdates(nil) }
 }
 
+/// Warning copy is presentation; opaque identity includes every uncertain request.
+public struct RestartConsentSnapshot: Equatable, Sendable {
+  public let message: String?
+  public let identity: [String]
+  public init(message: String?, identity: [String]) {
+    self.message = message
+    self.identity = identity
+  }
+}
+
 /// A postponed Sparkle callback must remain reachable while the user continues working.
 /// Eligibility is read again after the confirmation dialog and at application termination.
 @MainActor
 final class UpdateRestartGate {
   var blocker: () -> String? = { "앱이 시작되는 중입니다. 잠시 후 다시 시도해 주세요." }
-  var warning: () -> String? = { nil }
+  var warning: () -> RestartConsentSnapshot = { RestartConsentSnapshot(message: nil, identity: []) }
   var confirm: (String?) -> Bool = { _ in false }
   private(set) var pendingInstall: (() -> Void)?
   private(set) var installationIntended = false
   private var consented = false
-  private var consentedWarning: String?
+  private var consentedWarning: RestartConsentSnapshot?
 
   var isPending: Bool { pendingInstall != nil }
   func postpone(_ install: @escaping () -> Void) {
@@ -98,7 +108,7 @@ final class UpdateRestartGate {
     guard let install = pendingInstall else { return nil }
     if let reason = blocker() { return reason }
     let currentWarning = warning()
-    guard confirm(currentWarning) else { return "업데이트 설치를 미뤘습니다. 작업을 계속한 뒤 다시 시도할 수 있습니다." }
+    guard confirm(currentWarning.message) else { return "업데이트 설치를 미뤘습니다. 작업을 계속한 뒤 다시 시도할 수 있습니다." }
     // NSAlert's nested event loop can admit new work while the dialog is open.
     if let reason = blocker() { return reason }
     guard warning() == currentWarning else {
@@ -117,7 +127,7 @@ final class UpdateRestartGate {
     }
     let currentWarning = warning()
     if !consented || consentedWarning != currentWarning {
-      guard confirm(currentWarning) else { return false }
+      guard confirm(currentWarning.message) else { return false }
       guard blocker() == nil, warning() == currentWarning else { return false }
       consented = true
       consentedWarning = currentWarning
@@ -160,7 +170,8 @@ public final class UpdateController: NSObject, ObservableObject, SPUUpdaterDeleg
   }
 
   public func configureRestartSafety(
-    blocker: @escaping @MainActor () -> String?, warning: @escaping @MainActor () -> String?
+    blocker: @escaping @MainActor () -> String?,
+    warning: @escaping @MainActor () -> RestartConsentSnapshot
   ) {
     restart.blocker = blocker
     restart.warning = warning
