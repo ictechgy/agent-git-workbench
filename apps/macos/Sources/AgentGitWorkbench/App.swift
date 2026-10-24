@@ -1,11 +1,13 @@
 import AppKit
 import SwiftUI
 import WorkbenchUI
+import WorkbenchUpdates
 
 @main
 struct AgentGitWorkbenchApp: App {
   @NSApplicationDelegateAdaptor(WorkbenchAppDelegate.self) private var appDelegate
   @StateObject private var store = WorkbenchStore()
+  @StateObject private var updates = UpdateController()
   @StateObject private var layout = LayoutPreferences()
   @StateObject private var reading = ReadingPreferences()
   var body: some Scene {
@@ -15,6 +17,15 @@ struct AgentGitWorkbenchApp: App {
       )
       .task {
         appDelegate.store = store
+        appDelegate.updates = updates
+        updates.configureRestartSafety(
+          blocker: { [weak store = store] in
+            guard let store else { return "앱이 시작되는 중입니다. 잠시 후 다시 시도해 주세요." }
+            return store.updateRestartBlocker
+          },
+          warning: { [weak store = store] in store?.updateRestartWarning }
+        )
+        updates.start()
         await store.startup()
         while !Task.isCancelled {
           do { try await Task.sleep(for: .seconds(3)) } catch { break }
@@ -32,6 +43,10 @@ struct AgentGitWorkbenchApp: App {
     .defaultSize(width: 1440, height: 960)
     .commands {
       WorkbenchViewCommands(store: store, layout: layout, reading: reading)
+      CommandGroup(after: .appInfo) {
+        Button("업데이트 확인…") { updates.checkForUpdates() }
+          .disabled(!updates.canCheckForUpdates)
+      }
       CommandGroup(replacing: .newItem) {
         Button("새 작업…") {
           store.recoveryTaskID = nil
@@ -49,18 +64,24 @@ struct AgentGitWorkbenchApp: App {
         Button("시작 화면") { store.showingWelcome = true }.disabled(store.busy)
       }
     }
+    Settings { UpdateSettingsView(updates: updates) }
   }
 }
 
 @MainActor
 final class WorkbenchAppDelegate: NSObject, NSApplicationDelegate {
   var store: WorkbenchStore?
-  private var repliedToTermination = false
+  var updates: UpdateController?
+  private var terminationRequestID: UUID?
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard updates?.permitsApplicationTermination() != false else { return .terminateCancel }
+    let requestID = UUID()
+    terminationRequestID = requestID
     func finish() {
-      guard !repliedToTermination else { return }
-      repliedToTermination = true
-      sender.reply(toApplicationShouldTerminate: true)
+      guard terminationRequestID == requestID else { return }
+      terminationRequestID = nil
+      // Cleanup awaits and the timeout both yield; new work must still veto an update exit.
+      sender.reply(toApplicationShouldTerminate: updates?.permitsApplicationTermination() != false)
     }
     Task {
       await store?.stopIdleServices()

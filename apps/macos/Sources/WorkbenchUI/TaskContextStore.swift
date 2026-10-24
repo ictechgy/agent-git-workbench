@@ -20,6 +20,10 @@ public final class TaskContextStore: ObservableObject {
   @Published public private(set) var bundle: TaskContextBundle?
   @Published var draft: ContextDraft?
   @Published public private(set) var working = false
+  // Unlike visible-scope `working`, this count survives navigation/reset until each RPC returns.
+  @Published private(set) var inFlightWorkCount = 0
+  // Session-only uncertainty survives navigation; an update asks the user to inspect it.
+  private(set) var updateUncertainWriteOrigins: Set<String> = []
   @Published public private(set) var loaded = false
   @Published public private(set) var message: String?
   private var client: ServiceClient?
@@ -28,6 +32,7 @@ public final class TaskContextStore: ObservableObject {
   private var operation: WorkbenchOperation?
   private var scopeResolved = false
   private var title = ""
+  private var updateOriginDescription = ""
   private var scope = ""
   private var token = UUID()
   private var scopeToken = UUID()
@@ -54,14 +59,16 @@ public final class TaskContextStore: ObservableObject {
     else { drafts.removeValue(forKey: scope) }
   }
   private func beginWork() -> UUID {
+    inFlightWorkCount += 1
     let id = UUID(); activeWork = id; writeEpoch = UUID(); working = true; message = nil; return id
   }
   private func finishWork(_ id: UUID) {
+    inFlightWorkCount -= 1
     if activeWork == id { activeWork = nil; working = false }
   }
   func configure(client: ServiceClient, workspace: String, location: WorktreeSelection,
                  contextOperationID: String?, operation: WorkbenchOperation?,
-                 operationResolved: Bool = true, title: String) {
+                 operationResolved: Bool = true, title: String, updateOrigin: String? = nil) {
     // Folder identity and context identity are independent: an original folder
     // can still show Task context, and missing Task metadata must never select repo scope.
     let contextID = contextOperationID ?? location.opId
@@ -84,6 +91,7 @@ public final class TaskContextStore: ObservableObject {
     scope = key; self.client = client; self.location = location
     self.contextOperationID = contextID; self.operation = matchingOperation
     self.scopeResolved = resolved; self.title = title
+    updateOriginDescription = updateOrigin ?? title
     if !resolved {
       loaded = false
       message = "선택한 작업 정보를 확인하지 못했습니다. 작성 내용은 유지됩니다. 새로고침으로 작업을 다시 확인한 뒤 저장해 주세요."
@@ -128,6 +136,12 @@ public final class TaskContextStore: ObservableObject {
     guard let context = bundle?.context else { return }
     draft = ContextDraft(context); message = nil
   }
+  private func rememberUncertainWrite(_ error: any Error, origin: String) {
+    if let failure = error as? ServiceFailure {
+      guard failure.code.hasSuffix("outcome_unknown") else { return }
+    } else if (error as? TransportFailure)?.requestMayHaveBeenSent == false { return }
+    updateUncertainWriteOrigins.insert(HandoffText.field(origin))
+  }
   public func save() async {
     guard let client, let draft, scopeResolved, loaded, !working else { return }
     var values = params(target: false)
@@ -140,6 +154,7 @@ public final class TaskContextStore: ObservableObject {
     let work = beginWork()
     defer { finishWork(work) }
     let version = scopeToken
+    let updateOrigin = updateOriginDescription
     do {
       let result: TaskContextBundle = try await client.call("save_task_context", params: values)
       // A metadata lookup can become unavailable while this confirmed save is
@@ -150,6 +165,7 @@ public final class TaskContextStore: ObservableObject {
       drafts.removeValue(forKey: scope)
       if scopeResolved { message = "이 기기의 작업 이력에 저장했습니다." }
     } catch {
+      rememberUncertainWrite(error, origin: updateOrigin)
       guard version == scopeToken else { return }
       message = UserFacingFailure.message(error)
     }
@@ -174,12 +190,14 @@ public final class TaskContextStore: ObservableObject {
     let work = beginWork()
     defer { finishWork(work) }
     let version = scopeToken
+    let updateOrigin = updateOriginDescription
     do {
       let result: TaskContextBundle = try await client.call(method, params: values)
       guard version == scopeToken, scopeResolved else { return false }
       accept(result)
       return true
     } catch {
+      rememberUncertainWrite(error, origin: updateOrigin)
       guard version == scopeToken else { return false }
       message = (error as? ServiceFailure)?.code == "stale_snapshot"
         ? "검사 전에 변경이 생겼습니다. 새로고침한 뒤 다시 검사하세요."

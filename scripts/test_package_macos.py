@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Focused tests for release identity, architecture, and fail-closed notarization."""
+import base64
 import json
 import hashlib
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,12 +16,53 @@ from unittest.mock import patch
 
 import build_macos
 import package_macos
+import sparkle_support
 
 
 class PackagingTests(unittest.TestCase):
     def package_args(self, output, app=Path("provided.app")):
         return SimpleNamespace(version="0.1.0-alpha.1", build_number="2", output_dir=output,
                                app=app, sign_identity=None, notary_profile=None)
+
+    def sparkle_fixture(self, package):
+        """A versioned framework fixture with SwiftPM's actual provenance shape."""
+        artifact = package / ".build/artifacts/sparkle/Sparkle/Sparkle.xcframework"
+        framework = artifact / "macos-arm64_x86_64/Sparkle.framework"
+        version = framework / "Versions/B"
+        for name in ["Sparkle", "Autoupdate", "XPCServices/Installer.xpc/Contents/MacOS/Installer",
+                     "XPCServices/Downloader.xpc/Contents/MacOS/Downloader", "Updater.app/Contents/MacOS/Updater"]:
+            code = version / name
+            code.parent.mkdir(parents=True, exist_ok=True)
+            code.write_bytes(b"fixture nested code")
+        (version / "Resources").mkdir()
+        with (version / "Resources/Info.plist").open("wb") as target:
+            plistlib.dump({"CFBundleIdentifier": "org.sparkle-project.Sparkle",
+                          "CFBundleShortVersionString": sparkle_support.SPARKLE_VERSION,
+                          "CFBundleVersion": sparkle_support.SPARKLE_BUILD}, target)
+        (framework / "Versions/Current").symlink_to("B", target_is_directory=True)
+        (framework / "Resources").symlink_to("Versions/Current/Resources", target_is_directory=True)
+        (framework / "Sparkle").symlink_to("Versions/Current/Sparkle")
+        with (artifact / "Info.plist").open("wb") as target:
+            plistlib.dump({"AvailableLibraries": [{"LibraryIdentifier": "macos-arm64_x86_64",
+                          "LibraryPath": "Sparkle.framework", "SupportedPlatform": "macos",
+                          "SupportedArchitectures": ["arm64", "x86_64"]}]}, target)
+        pin = {"revision": sparkle_support.SPARKLE_REVISION, "version": sparkle_support.SPARKLE_VERSION}
+        (package / "Package.resolved").write_text(json.dumps({"pins": [{"identity": "sparkle",
+            "location": sparkle_support.SPARKLE_URL, "state": pin}]}))
+        manifest = {"object": {"dependencies": [{"packageRef": {"identity": "sparkle"},
+                       "state": {"checkoutState": pin}}], "artifacts": [{
+                       "packageRef": {"identity": "sparkle"}, "targetName": "Sparkle",
+                       "path": str(artifact), "source": {"type": "remote",
+                       "url": sparkle_support.SPARKLE_ARCHIVE_URL,
+                       "checksum": sparkle_support.SPARKLE_CHECKSUM}}]}}
+        (package / ".build/workspace-state.json").write_text(json.dumps(manifest))
+        (artifact.parent / "LICENSE").write_bytes(b"Synthetic test dependency license\n")
+        resources = package / "Resources"
+        resources.mkdir(exist_ok=True)
+        (resources / "UpdateConfiguration.json").write_text(json.dumps({
+            "feed_url": sparkle_support.FEED_URL,
+            "public_ed_key": base64.b64encode(bytes(range(32))).decode()}))
+        return framework
 
     def test_prerelease_has_separate_numeric_apple_version(self):
         self.assertEqual(build_macos.version_metadata("0.1.0-alpha.1", "2"), {
@@ -31,22 +74,38 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_macos.version_metadata("0.1.0", "0")
 
-    def test_developer_signs_helper_then_bundle_with_runtime_and_timestamp(self):
+    def test_developer_signs_nested_sparkle_inside_out_then_engine_and_bundle(self):
         details = {"Authority": ["Developer ID Application: Test"], "Timestamp": ["today"],
-                   "CodeDirectory v": ["20500 flags=0x10000(runtime)"]}
-        with patch.object(build_macos.subprocess, "run") as run, \
-                patch.object(build_macos, "signature_details", return_value=details):
-            build_macos.sign_bundle(Path("River.app"), "identity")
-        signed = [call.args[0] for call in run.call_args_list if "--sign" in call.args[0]]
-        self.assertEqual([command[-1] for command in signed],
-                         ["River.app/Contents/Helpers/workbench", "River.app"])
-        for command in signed:
-            self.assertIn("--timestamp", command)
-            self.assertEqual(command[command.index("--options") + 1], "runtime")
+                   "TeamIdentifier": ["TEAM"], "CodeDirectory v": ["20500 flags=0x10000(runtime)"]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            framework = self.sparkle_fixture(root / "package")
+            bundle = root / "River.app"
+            destination = bundle / "Contents/Frameworks/Sparkle.framework"
+            shutil.copytree(framework, destination, symlinks=True)
+            with patch.object(build_macos.subprocess, "run") as run, \
+                    patch.object(build_macos, "signature_details", return_value=details), \
+                    patch.object(build_macos, "signature_entitlements", return_value={
+                        "com.apple.security.app-sandbox": True, "com.apple.security.network.client": True}):
+                build_macos.sign_bundle(bundle, "identity")
+            signed = [call.args[0] for call in run.call_args_list if "--sign" in call.args[0]]
+            self.assertEqual([Path(command[-1]).relative_to(bundle).as_posix() if Path(command[-1]) != bundle else "."
+                              for command in signed], [
+                "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
+                "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
+                "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+                "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
+                "Contents/Frameworks/Sparkle.framework", "Contents/Helpers/workbench", "."])
+            for index, command in enumerate(signed):
+                self.assertIn("--timestamp", command)
+                self.assertNotIn("--deep", command)
+                self.assertEqual(command[command.index("--options") + 1], "runtime")
+                self.assertEqual("--preserve-metadata=entitlements" in command, index < 5)
 
     def test_signing_failure_propagates_without_signing_outer_bundle(self):
-        with patch.object(build_macos.subprocess, "run", side_effect=
-                          subprocess.CalledProcessError(1, ["codesign"])) as run:
+        with patch.object(build_macos, "signed_code_paths", return_value=[Path("Installer.xpc"), Path("River.app")]), \
+                patch.object(build_macos.subprocess, "run", side_effect=
+                             subprocess.CalledProcessError(1, ["codesign"])) as run:
             with self.assertRaises(subprocess.CalledProcessError):
                 build_macos.sign_bundle(Path("River.app"), "identity")
         self.assertEqual(run.call_count, 1)
@@ -168,12 +227,17 @@ class PackagingTests(unittest.TestCase):
                 package = root / "package"
                 (package / "Resources").mkdir(parents=True)
                 (package / "Resources/AppIcon.icns").write_bytes(b"icon")
+                self.sparkle_fixture(package)
                 with patch.object(build_macos, "ROOT", root), patch.dict(os.environ, environment, clear=True):
                     engine = build_macos.build_engine("debug")
                     bundle = root / "River.app"
-                    with patch.object(build_macos, "sign_bundle"):
+                    with patch.object(build_macos, "sign_bundle"), \
+                            patch.object(build_macos, "verify_sparkle_linkage"), \
+                            patch.object(build_macos, "verify_original_framework"), \
+                            patch.object(build_macos, "SPARKLE_LICENSE_SHA256", hashlib.sha256(b"Synthetic test dependency license\n").hexdigest()):
                         build_macos.assemble_bundle(bundle, swift, engine, package, "debug", {}, "-")
                 bundled = bundle / "Contents/Helpers/workbench"
+                self.assertTrue((bundle / "Contents/Frameworks/Sparkle.framework/Versions/Current").is_symlink())
                 self.assertNotEqual(engine, stale)
                 self.assertEqual(bundled.read_bytes(), engine.read_bytes())
                 self.assertEqual(subprocess.check_output([bundled], text=True), "current engine\n")
@@ -288,6 +352,132 @@ class PackagingTests(unittest.TestCase):
                          "시스템 설정 > 개인정보 보호 및 보안 > 확인 없이 열기",
                          "https://support.apple.com/en-us/102445"]:
             self.assertIn(required, readmes[0])
+
+    def test_update_configuration_rejects_missing_weak_and_noncanonical_keys_or_foreign_feeds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "UpdateConfiguration.json"
+            with self.assertRaises(FileNotFoundError):
+                sparkle_support.load_update_configuration(path)
+            good = {"feed_url": sparkle_support.FEED_URL,
+                    "public_ed_key": base64.b64encode(bytes(range(32))).decode()}
+            for config in [{**good, "public_ed_key": "placeholder"},
+                           {**good, "public_ed_key": base64.b64encode(b"short").decode()},
+                           {**good, "public_ed_key": base64.b64encode(bytes(32)).decode()},
+                           {**good, "feed_url": "https://example.invalid/appcast.xml"},
+                           {**good, "secret_key": "must never be bundled"}]:
+                path.write_text(json.dumps(config))
+                with self.subTest(config=config), self.assertRaises(ValueError):
+                    sparkle_support.load_update_configuration(path)
+            path.write_text(json.dumps(good))
+            self.assertEqual(sparkle_support.load_update_configuration(path), good)
+
+    def test_sparkle_comes_only_from_matching_resolved_remote_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            framework = self.sparkle_fixture(package)
+            self.assertEqual(sparkle_support.locate_sparkle_framework(package), framework)
+            manifest_path = package / ".build/workspace-state.json"
+            original = json.loads(manifest_path.read_text())
+            for mutate in [lambda state: state["object"]["artifacts"][0]["source"].update(checksum="0" * 64),
+                           lambda state: state["object"].update(artifacts=[]),
+                           lambda state: state["object"]["artifacts"][0].update(path=str(package / "untrusted.xcframework")),
+                           lambda state: state["object"]["dependencies"][0]["state"]["checkoutState"].update(version="2.9.0")]:
+                state = json.loads(json.dumps(original))
+                mutate(state)
+                manifest_path.write_text(json.dumps(state))
+                with self.assertRaises(ValueError):
+                    sparkle_support.locate_sparkle_framework(package)
+            manifest_path.write_text(json.dumps(original))
+            (framework / "Sparkle").unlink()
+            (framework / "Sparkle").symlink_to("/usr/bin/true")
+            with self.assertRaisesRegex(ValueError, "unsafe or broken symlink"):
+                sparkle_support.locate_sparkle_framework(package)
+
+    def test_missing_framework_and_foreign_nested_team_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "framework is missing"):
+                build_macos.sign_bundle(Path(temporary) / "River.app", "identity")
+        good = {"Authority": ["Developer ID Application: Test"], "Timestamp": ["today"],
+                "TeamIdentifier": ["TEAM"], "CodeDirectory v": ["20500 flags=0x10000(runtime)"]}
+        with patch.object(build_macos, "signed_code_paths", return_value=[Path("framework"), Path("app")]), \
+                patch.object(build_macos, "signature_details", side_effect=[good, {**good, "TeamIdentifier": ["OTHER"]}]), \
+                patch.object(build_macos, "signature_entitlements", return_value={}):
+            with self.assertRaisesRegex(ValueError, "signing teams differ"):
+                build_macos.signing_metadata(Path("River.app"))
+
+    def test_linkage_requires_embedded_framework_and_explicit_runtime_path(self):
+        good_library = "app:\n\t@rpath/Sparkle.framework/Versions/B/Sparkle (compatibility version 1.0.0)\n"
+        good_rpath = "cmd LC_RPATH\n cmdsize 56\n path @executable_path/../Frameworks (offset 12)\n"
+        with patch.object(build_macos.subprocess, "check_output", side_effect=[good_library, good_rpath]):
+            build_macos.verify_sparkle_linkage(Path("app"))
+        for libraries, rpath in [(good_library.replace("@rpath", "/tmp/build"), good_rpath),
+                                 (good_library, good_rpath.replace("../Frameworks", "/tmp/Frameworks"))]:
+            with patch.object(build_macos.subprocess, "check_output", side_effect=[libraries, rpath]):
+                with self.assertRaises(ValueError):
+                    build_macos.verify_sparkle_linkage(Path("app"))
+
+    def test_distribution_rejects_disabled_library_validation(self):
+        details = {"Authority": ["Developer ID Application: Test"], "Timestamp": ["today"],
+                   "TeamIdentifier": ["TEAM"], "CodeDirectory v": ["20500 flags=0x10000(runtime)"]}
+        for path, entitlements, message in [
+                (Path("River.app"), {"com.apple.security.cs.disable-library-validation": True}, "library validation")]:
+            with patch.object(build_macos, "signed_code_paths", return_value=[path]), \
+                    patch.object(build_macos, "signature_details", return_value=details), \
+                    patch.object(build_macos, "signature_entitlements", return_value=entitlements):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_macos.signing_metadata(Path("River.app"))
+
+    def test_lost_sparkle_entitlements_stop_before_outer_signing(self):
+        paths = [Path("Downloader.xpc"), Path("workbench"), Path("River.app")]
+        with patch.object(build_macos, "signed_code_paths", return_value=paths), \
+                patch.object(build_macos, "signature_entitlements", side_effect=[{"network": True}, {}]), \
+                patch.object(build_macos.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "entitlements were not preserved"):
+                build_macos.sign_bundle(Path("River.app"), "identity")
+        self.assertEqual(run.call_count, 1)
+
+    def test_bundle_metadata_binds_update_policy_sparkle_and_entire_resource_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "package"
+            framework = self.sparkle_fixture(package)
+            bundle = root / "River.app"
+            shutil.copytree(framework, bundle / "Contents/Frameworks/Sparkle.framework", symlinks=True)
+            shutil.copytree(package / "Resources", bundle / "Contents/Resources")
+            resources = bundle / "Contents/Resources"
+            provenance = sparkle_support.framework_provenance(package, framework)
+            license_bytes = (framework.parents[2] / "LICENSE").read_bytes()
+            provenance["license_sha256"] = hashlib.sha256(license_bytes).hexdigest()
+            (resources / "Sparkle-LICENSE.txt").write_bytes(license_bytes)
+            (resources / "SparkleProvenance.json").write_text(json.dumps(provenance))
+            for relative in ["Contents/MacOS/AgentGitWorkbench", "Contents/Helpers/workbench"]:
+                code = bundle / relative
+                code.parent.mkdir(parents=True)
+                code.write_bytes(b"fixture executable")
+            config = sparkle_support.load_update_configuration(resources / "UpdateConfiguration.json")
+            info = {"CFBundleIdentifier": build_macos.APP_IDENTIFIER,
+                    "CFBundleExecutable": build_macos.APP_EXECUTABLE,
+                    "RiverBuildConfiguration": "release",
+                    **build_macos.version_metadata("0.1.0-alpha.1", "2"),
+                    **sparkle_support.update_info(config)}
+            info_path = bundle / "Contents/Info.plist"
+            with info_path.open("wb") as target:
+                plistlib.dump(info, target)
+            with patch.object(package_macos, "architectures", return_value={"arm64"}), \
+                    patch.object(package_macos, "verify_signature"), \
+                    patch.object(package_macos, "verify_sparkle_linkage"), \
+                    patch.object(package_macos, "SPARKLE_LICENSE_SHA256", provenance["license_sha256"]), \
+                    patch.object(package_macos, "signing_metadata", return_value={"kind": "developer-id", "team_identifier": "TEAM"}):
+                metadata = package_macos.bundle_metadata(bundle)
+                self.assertEqual(metadata["updates"], sparkle_support.update_info(config))
+                self.assertEqual(metadata["sparkle"]["revision"], sparkle_support.SPARKLE_REVISION)
+                (resources / "extra.txt").write_text("mounted-copy resource tampering")
+                self.assertNotEqual(package_macos.bundle_metadata(bundle)["bundle_tree_sha256"], metadata["bundle_tree_sha256"])
+                info["SURequireSignedFeed"] = False
+                with info_path.open("wb") as target:
+                    plistlib.dump(info, target)
+                with self.assertRaisesRegex(ValueError, "update settings"):
+                    package_macos.bundle_metadata(bundle)
 
 
 if __name__ == "__main__":

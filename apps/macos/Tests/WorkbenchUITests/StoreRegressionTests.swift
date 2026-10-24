@@ -2065,3 +2065,133 @@ func repositoryNavigationPreservesUnresolvedContextAndLeavesKnownNonmemberContex
   #expect(replies.lock.withLock { replies.statusSelections.last } == WorktreeSelection(repoId: "c"))
   #expect(replies.lock.withLock { replies.mutationCalls.isEmpty })
 }
+
+@Test @MainActor func updateRestartWaitsForRemoteWriteInPreviousWorkspace() async throws {
+  let first = RemoteReplies(); let second = RemoteReplies()
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect(); await store.loadRemoteState()
+  #expect(store.updateRestartBlocker == nil)
+  let plan = try store.remotePlan(.fetch, remote: "origin")
+  first.lock.withLock { first.holdWrite = true }
+  let write = Task { try await store.executeRemote(plan) }; try await wait(first.arrived)
+  store.socketPath = serverB.path; await store.connect()
+  #expect(!store.busy && !store.remoteBusy)
+  #expect(store.updateRestartBlocker?.contains("원격 Git 작업") == true)
+  first.gate.signal(); try await write.value
+  #expect(store.updateRestartBlocker == nil)
+}
+
+@Test @MainActor func updateRestartWaitsForContextWriteAfterVisibleScopeReset() async throws {
+  let first = Replies(); let second = Replies()
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  store.taskContext.draft?.purpose = "save in the first workspace"
+  first.lock.withLock { first.holdSave = true }
+  let write = Task { await store.taskContext.save() }; try await wait(first.arrived)
+  #expect(store.taskContext.inFlightWorkCount == 1)
+  store.socketPath = serverB.path; await store.connect()
+  #expect(!store.taskContext.working)
+  #expect(store.updateRestartBlocker?.contains("작업 정보 저장") == true)
+  first.gate.signal(); await write.value
+  #expect(store.taskContext.inFlightWorkCount == 0)
+  #expect(store.updateRestartBlocker == nil)
+}
+
+@Test @MainActor func updateRestartRetainsOldWorkspaceTaskUntilDirectLookupConfirmsCompletion() async throws {
+  let first = ScopedContextReplies(); first.preparationState = "running"
+  let second = Replies()
+  let serverA = try TestService { first.respond($0) }; let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  #expect(store.hasRunningOperation && store.updateRestartBlocker != nil)
+  store.socketPath = serverB.path; await store.connect()
+  #expect(!store.hasRunningOperation)
+  #expect(store.updateRestartBlocker?.contains("워크트리 준비") == true)
+  await store.refresh()
+  #expect(store.updateRestartBlocker != nil)
+  first.lock.withLock { first.paginated = true; first.lookupFails = true; first.preparationState = "ready" }
+  store.socketPath = serverA.path; await store.connect()
+  #expect(!store.hasRunningOperation && store.updateRestartBlocker != nil)
+  first.lock.withLock { first.lookupFails = false }
+  await store.refresh()
+  #expect(first.lock.withLock { first.lookupIDs.contains("op") })
+  #expect(store.updateRestartBlocker == nil)
+}
+
+@Test @MainActor func updateRestartRequiresInspectionWarningForUnknownWriteWithoutClearingOriginalNotice() async throws {
+  let replies = RemoteReplies(); replies.failure = "unknown"
+  let server = try TestService { replies.respond($0) }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect(); await store.loadRemoteState()
+  let plan = try store.remotePlan(.push, remote: "origin", branch: "main")
+  do { try await store.executeRemote(plan); Issue.record("Unknown write was reported as success") }
+  catch UIError.remoteOutcomeUnknown {}
+  #expect(!store.busy && !store.remoteBusy)
+  #expect(store.updateRestartBlocker == nil)
+  #expect(store.updateRestartWarning?.contains("처리 결과") == true)
+  #expect(store.submissionWarnings.count == 1)
+  store.dismissSubmissionWarning(try #require(store.submissionWarnings.first).id)
+  #expect(store.updateRestartBlocker == nil && store.updateRestartWarning == nil)
+}
+
+@Test @MainActor func updateRestartTracksAcceptedTaskSubmissionAcrossWorkspaceSwitch() async throws {
+  let first = SubmissionReplies(); first.heldMethod = "execute_plan"
+  let second = SubmissionReplies()
+  let serverA = try TestService { request in
+    var response = first.respond(request)
+    if request["method"] as? String == "execute_plan", var operation = response["result"] as? [String: Any] {
+      operation["status"] = "running"; response["result"] = operation
+    }
+    return response
+  }
+  let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  let plan = try await store.planTask(group: "group", label: "A", slug: "a", mode: "materialize")
+  let submit = Task { try await store.executePlan(plan, key: "one-accepted-submission") }
+  try await wait(first.arrived)
+  store.socketPath = serverB.path; await store.connect()
+  #expect(!store.busy && !store.hasRunningOperation)
+  #expect(store.updateRestartBlocker != nil)
+  first.gate.signal()
+  do { try await submit.value; Issue.record("Old submission was published in the new workspace") }
+  catch UIError.workspaceChangedAfterSubmission {}
+  #expect(store.operations.isEmpty)
+  #expect(store.updateRestartBlocker?.contains("워크트리 준비") == true)
+}
+
+@Test @MainActor func updateRestartRetainsContextUncertaintyAfterSwitchWithoutBlockingForever() async throws {
+  let first = Replies(); first.holdSave = true
+  let second = Replies()
+  let serverA = try TestService { request in
+    if request["method"] as? String == "save_task_context" {
+      _ = first.respond(request); return nil
+    }
+    return first.respond(request)
+  }
+  let serverB = try TestService { second.respond($0) }
+  let store = WorkbenchStore(socketPath: serverA.path); await store.connect()
+  store.taskContext.draft?.purpose = "uncertain original workspace save"
+  let save = Task { await store.taskContext.save() }; try await wait(first.arrived)
+  store.socketPath = serverB.path; await store.connect()
+  #expect(store.updateRestartBlocker != nil)
+  first.gate.signal(); await save.value
+  #expect(store.updateRestartBlocker == nil)
+  #expect(store.updateRestartWarning?.contains("작업 정보 변경 결과") == true)
+  await store.refresh()
+  #expect(store.updateRestartWarning != nil)
+}
+
+@Test(arguments: ["oversized", "rejected"]) @MainActor
+func updateRestartDoesNotInventContextUncertaintyForKnownRejectedWrites(failure: String) async throws {
+  let replies = Replies()
+  let server = try TestService { request in
+    if request["method"] as? String == "save_task_context" {
+      return ["schema_version": 1, "error": ["code": "stale_task_context", "message": "known rejection"]]
+    }
+    return replies.respond(request)
+  }
+  let store = WorkbenchStore(socketPath: server.path); await store.connect()
+  store.taskContext.draft?.notes = failure == "oversized" ? String(repeating: "x", count: 2 * 1024 * 1024) : "rejected notes"
+  await store.taskContext.save()
+  #expect(store.taskContext.message != nil)
+  #expect(store.updateRestartBlocker == nil && store.updateRestartWarning == nil)
+  #expect(store.taskContext.isDirty)
+}

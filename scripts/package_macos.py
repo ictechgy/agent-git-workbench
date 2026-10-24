@@ -13,7 +13,10 @@ import sys
 import tempfile
 
 from build_macos import (APP_EXECUTABLE, APP_IDENTIFIER, ROOT, signature_details,
-                         verify_signature, version_metadata)
+                         signed_code_paths, signing_metadata, verify_signature,
+                         verify_sparkle_linkage, version_metadata)
+from sparkle_support import (SPARKLE_ARCHIVE_URL, SPARKLE_CHECKSUM, SPARKLE_LICENSE_SHA256, SPARKLE_REVISION,
+                             SPARKLE_VERSION, load_update_configuration, tree_digest, update_info)
 
 
 INSTALL_README = """River — Install / 설치
@@ -86,7 +89,10 @@ def source_snapshot(root=None):
     patch = git("diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--",
                 capture_output=True).stdout
     # Include ignored files here too: an ignored Swift/Rust file can still enter a build.
-    untracked = git("ls-files", "--others", "-z", "--", "apps/macos/Sources", "crates", ".cargo",
+    untracked = git("ls-files", "--others", "-z", "--", "apps/macos/Sources",
+                    "apps/macos/Resources", "apps/macos/Package.swift", "apps/macos/Package.resolved",
+                    "scripts/build_macos.py", "scripts/package_macos.py", "scripts/sparkle_support.py",
+                    "crates", ".cargo",
                     capture_output=True).stdout
     if git("rev-parse", "HEAD", capture_output=True, text=True).stdout.strip() != head:
         raise ValueError("source HEAD changed while capturing build provenance")
@@ -100,7 +106,7 @@ def clean_source_snapshot(root=None):
     if initial["tracked_status"]:
         raise ValueError("release packaging requires a clean tracked source tree; commit changes first")
     if initial["untracked_runtime_files"]:
-        raise ValueError("release packaging found untracked build inputs under apps/macos/Sources, crates or .cargo")
+        raise ValueError("release packaging found untracked build inputs under macOS build inputs, crates or .cargo")
     return initial
 
 
@@ -135,29 +141,42 @@ def bundle_metadata(bundle, expected=None):
     if app_archs != helper_archs:
         raise ValueError("app and bundled helper architectures differ")
     verify_signature(bundle)
-    signatures = [signature_details(path) for path in [helper, bundle]]
-    if all(details.get("Signature") == ["adhoc"] for details in signatures):
-        signing = {"kind": "ad-hoc", "team_identifier": None}
-    else:
-        for details in signatures:
-            if not any(authority.startswith("Developer ID Application:")
-                       for authority in details.get("Authority", [])):
-                raise ValueError("app and helper must both use ad-hoc or Developer ID Application signatures")
-            if not any("(runtime)" in value for value in details.get("CodeDirectory v", [])):
-                raise ValueError("Developer ID signature is missing hardened runtime")
-            if "Timestamp" not in details:
-                raise ValueError("Developer ID signature is missing a secure timestamp")
-        teams = [details.get("TeamIdentifier", [None])[0] for details in signatures]
-        if not teams[0] or teams[0] == "not set" or teams[0] != teams[1]:
-            raise ValueError("app and helper signing teams differ")
-        signing = {"kind": "developer-id", "team_identifier": teams[0]}
+    signing = signing_metadata(bundle)
+    verify_sparkle_linkage(executable)
+    for path in signed_code_paths(bundle)[:-2]:
+        binary = path
+        if path.suffix in {".xpc", ".app"}:
+            binary = path / "Contents/MacOS" / path.stem
+        elif path.suffix == ".framework":
+            binary = path / "Sparkle"
+        if not app_archs <= architectures(binary):
+            raise ValueError("embedded Sparkle code does not support the app architectures")
+    resources = bundle / "Contents/Resources"
+    config = load_update_configuration(resources / "UpdateConfiguration.json")
+    if any(info.get(key) != value or type(info.get(key)) is not type(value)
+           for key, value in update_info(config).items()):
+        raise ValueError("app update settings do not match the signed update configuration")
+    provenance = json.loads((resources / "SparkleProvenance.json").read_text())
+    expected_sparkle = {"version": SPARKLE_VERSION, "revision": SPARKLE_REVISION,
+                        "archive_url": SPARKLE_ARCHIVE_URL, "archive_sha256": SPARKLE_CHECKSUM}
+    if any(provenance.get(key) != value for key, value in expected_sparkle.items()):
+        raise ValueError("embedded Sparkle provenance does not match the pinned dependency")
+    for key in ["package_resolved_sha256", "source_framework_tree_sha256"]:
+        value = provenance.get(key)
+        if not isinstance(value, str) or len(value) != 64 or any(letter not in "0123456789abcdef" for letter in value):
+            raise ValueError("embedded Sparkle provenance has an invalid source digest")
+    if provenance.get("license_sha256") != SPARKLE_LICENSE_SHA256 or sha256(resources / "Sparkle-LICENSE.txt") != SPARKLE_LICENSE_SHA256:
+        raise ValueError("Sparkle license does not match bundled provenance")
     return {"version": info["RiverReleaseVersion"], "short_version": info["CFBundleShortVersionString"],
             "build_number": info["CFBundleVersion"], "configuration": "release",
             "bundle_identifier": APP_IDENTIFIER, "executable": APP_EXECUTABLE,
             "minimum_macos": info.get("LSMinimumSystemVersion"),
             "architecture": "universal2" if len(app_archs) == 2 else next(iter(app_archs)),
             "architectures": sorted(app_archs), "signing": signing,
-            "executable_sha256": sha256(executable), "helper_sha256": sha256(helper)}
+            "executable_sha256": sha256(executable), "helper_sha256": sha256(helper),
+            "bundle_tree_sha256": tree_digest(bundle),
+            "sparkle": {**provenance, "signed_framework_tree_sha256": tree_digest(bundle / "Contents/Frameworks/Sparkle.framework")},
+            "updates": update_info(config)}
 
 
 def verify_dmg(dmg, expected=None):

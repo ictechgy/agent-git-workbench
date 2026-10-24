@@ -59,6 +59,16 @@ public final class WorkbenchStore: ObservableObject {
   private var lastMetadataFailure: String?
   @Published private var contextWorking = false
   private var contextWorkObserver: AnyCancellable?
+  private var contextFlightObserver: AnyCancellable?
+  @Published private var contextWorkInFlight = false
+  @Published private var pendingTaskSubmissions = 0
+  // Running tasks remain relevant to updates after switching to another workspace.
+  private struct UpdateWorkspaceIdentity: Hashable {
+    let socket: String
+    let workspaceID: String
+  }
+  @Published private var updateRunningOperations: [UpdateWorkspaceIdentity: Set<String>] = [:]
+  private var updateWorkspaceNames: [UpdateWorkspaceIdentity: String] = [:]
   @Published public private(set) var stashes: [GitStash] = []
   @Published public private(set) var selectedStashOID: String?
   @Published public private(set) var stashDetail: StashDetail?
@@ -234,6 +244,7 @@ public final class WorkbenchStore: ObservableObject {
     self.socketPath = socketPath
     self.runtime = runtime
     contextWorkObserver = taskContext.$working.removeDuplicates().dropFirst().sink { [weak self] in self?.contextWorking = $0 }
+    contextFlightObserver = taskContext.$inFlightWorkCount.removeDuplicates().sink { [weak self] in self?.contextWorkInFlight = $0 > 0 }
   }
   public var canReconnect: Bool { currentWorkspace != nil || !socketPath.isEmpty }
   public var workspaceTitle: String { currentWorkspace?.name ?? workspace?.id ?? "작업공간" }
@@ -272,6 +283,40 @@ public final class WorkbenchStore: ObservableObject {
     if let currentWorkspace { await openRecent(currentWorkspace) } else { await connect() }
   }
   public func stopIdleServices() async { await runtime.stopIdleServices() }
+  /// Installation must consider every outstanding write, rather than only the visible folder.
+  public var updateRestartBlocker: String? {
+    if busy || pendingTaskSubmissions > 0 { return "저장소를 열거나 변경하는 작업이 진행 중입니다. 완료된 뒤 다시 시도해 주세요." }
+    if !remoteMutations.isEmpty { return "다른 폴더를 포함해 원격 Git 작업이 진행 중입니다. 완료된 뒤 다시 시도해 주세요." }
+    if contextWorking || contextWorkInFlight { return "작업 정보 저장 또는 검사 기록이 진행 중입니다. 완료된 뒤 다시 시도해 주세요." }
+    if hasRunningOperation || !updateRunningOperations.isEmpty {
+      let names = updateRunningOperations.keys.compactMap { updateWorkspaceNames[$0] }.sorted()
+      return "워크트리 준비 작업이 진행 중이거나 완료 여부를 확인해야 합니다. \(names.isEmpty ? "해당 저장소" : names.joined(separator: ", "))를 열어 상태를 새로고침한 뒤 다시 시도해 주세요."
+    }
+    return nil
+  }
+  /// Uncertainty needs a fresh, explicit user acknowledgement; it is not proof a job still runs.
+  public var updateRestartWarning: String? {
+    var warnings: [String] = []
+    if !unresolvedOperationIDs.isEmpty {
+      warnings.append("선택한 작업 상태를 확인하지 못했습니다. 해당 저장소와 작업의 실제 상태를 확인하세요.")
+    }
+    if !submissionWarnings.isEmpty {
+      let origins = Array(Set(submissionWarnings.map { HandoffText.field($0.workspaceTitle) + " · " + HandoffText.field($0.workspacePath) })).sorted().prefix(4)
+      warnings.append("처리 결과를 확인하지 못한 변경 요청 \(submissionWarnings.count)개가 있습니다: " + origins.joined(separator: "; ") + ". 화면의 원래 알림과 실제 Git 상태를 확인하세요.")
+    }
+    if !taskContext.updateUncertainWriteOrigins.isEmpty {
+      warnings.append("작업 정보 변경 결과를 확인하지 못한 위치가 있습니다: " + taskContext.updateUncertainWriteOrigins.sorted().prefix(4).joined(separator: "; ") + ". 저장소의 작업 정보와 검사 기록을 확인하세요.")
+    }
+    return warnings.isEmpty ? nil : warnings.joined(separator: "\n\n")
+  }
+  private func rememberUpdateOperation(_ operation: WorkbenchOperation, identity: UpdateWorkspaceIdentity, title: String) {
+    var running = updateRunningOperations[identity] ?? []
+    if operation.isRunning { running.insert(operation.id) } else { running.remove(operation.id) }
+    let next = running.isEmpty ? nil : running
+    if updateRunningOperations[identity] != next { updateRunningOperations[identity] = next }
+    if !running.isEmpty { updateWorkspaceNames[identity] = HandoffText.field(title) }
+    else { updateWorkspaceNames.removeValue(forKey: identity) }
+  }
   func openWorkspace(message: String, work: () async throws -> WorkspaceSession) async {
     guard !busy else { return }
     busy = true
@@ -634,6 +679,22 @@ public final class WorkbenchStore: ObservableObject {
       }
       guard version == generation else { return }
       if operations != ops { operations = ops }
+      let updateSocket = connectedSocketPath ?? socketPath
+      let updateIdentity = UpdateWorkspaceIdentity(socket: updateSocket, workspaceID: workspace?.id ?? "")
+      let previouslyRunning = updateRunningOperations[updateIdentity] ?? []
+      for op in ops { rememberUpdateOperation(op, identity: updateIdentity, title: workspaceTitle) }
+      // list_operations is paginated. Absence cannot prove an old running task finished.
+      for id in previouslyRunning.subtracting(Set(ops.map(\.id))).subtracting(activeOperationIDs).sorted() {
+        do {
+          let op: WorkbenchOperation = try await client.call("get_operation", params: ["op_id": .string(id)])
+          guard version == generation else { return }
+          guard op.id == id else { continue }
+          rememberUpdateOperation(op, identity: updateIdentity, title: workspaceTitle)
+        } catch {
+          guard version == generation else { return }
+          // Keep the restart block until this same service confirms a terminal status.
+        }
+      }
       let requiredIDs = activeOperationIDs
       var pinned: [String: WorkbenchOperation] = [:]
       var unresolved: Set<String> = []
@@ -657,6 +718,7 @@ public final class WorkbenchStore: ObservableObject {
         }
       }
       if pinnedOperations != pinned { pinnedOperations = pinned }
+      for op in pinned.values { rememberUpdateOperation(op, identity: updateIdentity, title: workspaceTitle) }
       if unresolvedOperationIDs != unresolved { unresolvedOperationIDs = unresolved }
       // Apply lookup authority before awaiting unrelated display metadata.
       configureTaskContext()
@@ -774,7 +836,8 @@ public final class WorkbenchStore: ObservableObject {
     taskContext.configure(client: client, workspace: connectedSocketPath + ":" + workspace.id,
       location: selection, contextOperationID: activeContextOperationID, operation: contextOperation,
       operationResolved: activeContextOperationID.map { !unresolvedOperationIDs.contains($0) } ?? true,
-      title: taskTitle)
+      title: taskTitle,
+      updateOrigin: workspaceTitle + " · " + (workspace.repositories.first { $0.id == selection.repoId }?.path ?? connectedSocketPath) + " · " + taskTitle)
   }
   public func chooseFile(_ path: String, staged: Bool? = nil) {
     clearDiffFailure()
@@ -988,8 +1051,11 @@ public final class WorkbenchStore: ObservableObject {
     guard plan.socket == socketPath, socketPath == connectedSocketPath else { throw UIError.workspaceChanged }
     guard plan.session == planSession else { throw UIError.planInvalidated }
     let originTitle = workspaceTitle
+    let updateIdentity = UpdateWorkspaceIdentity(socket: plan.socket, workspaceID: workspace?.id ?? "")
     let originPath = currentWorkspace?.repositoryPath ?? workspace?.repositories.first?.path ?? plan.socket
     let warningID = plan.socket + ":" + key
+    pendingTaskSubmissions += 1
+    defer { pendingTaskSubmissions -= 1 }
     let op: WorkbenchOperation
     do {
       op = try await client.call(
@@ -1002,6 +1068,7 @@ public final class WorkbenchStore: ObservableObject {
       if !submissionWarnings.contains(where: { $0.id == warningID }) { submissionWarnings.append(warning) }
       throw UIError.submissionOutcomeUnknown
     }
+    rememberUpdateOperation(op, identity: updateIdentity, title: originTitle)
     guard plan.session == planSession, self.client === client, plan.socket == socketPath
     else {
       report(UIError.workspaceChangedAfterSubmission)
